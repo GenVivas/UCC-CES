@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#123d36">
+    <title>UCC-CES | Partnership &amp; Project Management</title>
+    <link rel="stylesheet" href="assets/app.css">
+    <script src="assets/app.js" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="./" aria-label="UCC-CES home">
+            <span class="brand-mark" aria-hidden="true"><span>UCC</span></span>
+            <span class="brand-copy"><strong>University of Caloocan City</strong><small>Community Extension Services</small></span>
+        </a>
+        <div id="top-actions" class="top-actions" hidden>
+            <div class="notification-menu">
+                <button id="notification-button" class="notification-button" type="button" aria-label="Open notifications" title="Notifications" aria-expanded="false" aria-controls="notification-popover">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path>
+                    <path d="M10 21h4"></path>
+                </svg>
+                </button>
+                <section id="notification-popover" class="notification-popover" aria-label="Recent notifications" hidden>
+                    <div class="notification-popover-heading">
+                        <strong>Notifications</strong>
+                        <span>Recent updates</span>
+                    </div>
+                    <div id="notification-popover-content" class="notification-popover-content" aria-live="polite"></div>
+                    <button id="notification-view-all" class="notification-view-all" type="button">View all notifications</button>
+                </section>
+            </div>
+            <span id="user-label" class="user-label"></span>
+            <button id="logout-button" class="button button-quiet" type="button">Sign out</button>
+        </div>
+    </header>
+
+    <main class="shell">
+        <section id="auth-view" class="auth-layout">
+            <div class="intro">
+                <div class="intro-identity">
+                    <span class="crest-mark" aria-hidden="true"><span>UCC</span><i></i></span>
+                    <p class="eyebrow">COMMUNITY EXTENSION SERVICES</p>
+                </div>
+                <h1>University of<br>Caloocan City</h1>
+                <h2 class="intro-subtitle">Community Extension Services</h2>
+                <p>Integrated management for CES programs, community projects, volunteer coordination, and meaningful partnerships.</p>
+                <div class="intro-highlights" aria-label="Portal features">
+                    <div class="highlight-card"><span class="highlight-icon" aria-hidden="true">01</span><strong>Projects</strong><small>From proposal to impact</small></div>
+                    <div class="highlight-card"><span class="highlight-icon" aria-hidden="true">02</span><strong>Partnerships</strong><small>Working better together</small></div>
+                    <div class="highlight-card"><span class="highlight-icon" aria-hidden="true">03</span><strong>Community</strong><small>Service with purpose</small></div>
+                </div>
+            </div>
+            <div class="auth-card">
+                <div class="auth-card-heading">
+                    <p class="auth-card-kicker">WELCOME TO UCC-CES</p>
+                    <h2 id="auth-title">Sign in to CES Portal</h2>
+                    <p id="auth-subtitle">Enter your account credentials to continue.</p>
+                </div>
+                <div class="auth-tabs" role="tablist" aria-label="Account access">
+                    <button class="auth-tab is-active" type="button" data-auth="login" role="tab" aria-selected="true">Sign in</button>
+                    <button class="auth-tab" type="button" data-auth="register" role="tab" aria-selected="false">Create account</button>
+                </div>
+                <div id="auth-message" class="notice" role="status" aria-live="polite" hidden></div>
+                <form id="login-form" class="form-stack">
+                    <label>Email address<input name="email" type="email" autocomplete="username" placeholder="name@example.com" required></label>
+                    <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label>
+                    <button class="button button-primary" type="submit">Sign in <span aria-hidden="true">→</span></button>
+                    <p class="auth-card-footnote"><span class="security-icon" aria-hidden="true">✓</span> Secure access for UCC partners and volunteers</p>
+                </form>
+                <form id="register-form" class="form-stack" hidden>
+                    <div class="form-grid">
+                        <label>First name<input name="firstName" autocomplete="given-name" required></label>
+                        <label>Last name<input name="lastName" autocomplete="family-name" required></label>
+                    </div>
+                    <label>Email address<input name="email" type="email" autocomplete="email" required></label>
+                    <label>Contact number<input name="contactNumber" type="tel" autocomplete="tel" required></label>
+                    <label>Account type
+                        <select name="role" required>
+                            <option value="partner">Partner / proposer</option>
+                            <option value="volunteer">Volunteer</option>
+                        </select>
+                    </label>
+                    <div id="partner-fields" class="form-stack">
+                        <label>Organization name<input name="organizationName"></label>
+                        <label>Organization type
+                            <select name="organizationType">
+                                <option value="LGU">LGU</option><option value="NGA">NGA</option>
+                                <option value="NGO">NGO</option><option value="Private Sector">Private Sector</option>
+                                <option value="BPO">BPO</option><option value="Church">Church</option>
+                                <option value="UCC Department">UCC Department</option><option value="College">College</option>
+                                <option value="Barangay">Barangay</option><option value="Other">Other</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div id="volunteer-fields" class="form-stack" hidden>
+                        <label>Volunteer type
+                            <select name="volunteerType">
+                                <option value="student">Student</option><option value="professor">UCC Professor</option>
+                                <option value="tanod">Barangay Tanod</option><option value="civilian">Civilian</option>
+                                <option value="other">Other</option>
+                            </select>
+                        </label>
+                        <div class="form-grid">
+                            <label>Student number<input name="studentNumber" placeholder="12345678-N"></label>
+                            <label>Campus<input name="campus" list="campus-options"></label>
+                            <datalist id="campus-options"><option>Main Campus</option><option>Congressional</option><option>Bagong Silang</option><option>Camarin</option></datalist>
+                            <label>Course / program<input name="courseProgram"></label>
+                            <label>Faculty ID<input name="facultyId"></label>
+                            <label>Tanod ID<input name="tanodId"></label>
+                            <label>Assigned barangay<input name="barangay"></label>
+                            <label>Affiliation / organization<input name="affiliationName"></label>
+                        </div>
+                        <label>Supporting proof (PDF, JPG, PNG; max 10 MB)<input name="proof" type="file" accept=".pdf,.jpg,.jpeg,.png" required></label>
+                    </div>
+                    <label>Password <span class="field-hint">At least 12 characters</span><input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+                    <button class="button button-primary" type="submit">Request an account <span aria-hidden="true">→</span></button>
+                    <p class="fine-print">New accounts require CES Admin approval before sign-in.</p>
+                </form>
+            </div>
+        </section>
+
+        <section id="app-view" class="app-layout" hidden>
+            <aside class="sidebar">
+                <p class="eyebrow">WORKSPACE</p>
+                <nav id="main-nav" class="main-nav" aria-label="Main navigation">
+                    <button type="button" data-page="overview" class="nav-item is-active">Overview</button>
+                    <button type="button" data-page="proposals" class="nav-item" data-roles="admin,partner">Proposals</button>
+                    <button type="button" data-page="directory" class="nav-item">Partner directory</button>
+                    <button type="button" data-page="events" class="nav-item">Events &amp; attendance</button>
+                    <button type="button" data-page="accounts" class="nav-item admin-only" hidden>Accounts</button>
+                    <button type="button" data-page="reports" class="nav-item" data-roles="admin,partner">Reports</button>
+                    <button type="button" data-page="notifications" class="nav-item">Notifications</button>
+                </nav>
+                <div class="sidebar-foot">University of Caloocan City<br>Community Extension Services</div>
+            </aside>
+            <section class="workspace">
+                <div id="page-heading" class="page-heading"></div>
+                <div id="page-message" class="notice" role="status" aria-live="polite" hidden></div>
+                <div id="page-content"></div>
+                <section id="password-change-view" class="password-change-view" hidden></section>
+            </section>
+        </section>
+    </main>
+    <footer class="site-footer">UCC-CES Partnership &amp; Project Proposal Management System</footer>
+</body>
+</html>

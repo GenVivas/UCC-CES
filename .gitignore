@@ -1,0 +1,6 @@
+/config/local.php
+/vendor/
+/public/uploads/*
+!/public/uploads/.gitkeep
+/storage/logs/*
+!/storage/logs/.gitkeep

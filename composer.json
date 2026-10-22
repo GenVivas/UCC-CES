@@ -1,0 +1,20 @@
+{
+    "name": "ucc/ces-portal",
+    "description": "UCC Community Extension Services partnership and project management system",
+    "type": "project",
+    "require": {
+        "php": "^8.2",
+        "chillerlan/php-qrcode": "^5.0",
+        "dompdf/dompdf": "^3.1",
+        "phpmailer/phpmailer": "^6.10"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ces\\": "app/"
+        }
+    },
+    "config": {
+        "allow-plugins": false,
+        "sort-packages": true
+    }
+}
