@@ -11,6 +11,11 @@ const pageRoutes = {
     proposals: 'proposals',
     directory: 'directory',
     events: 'events',
+    applications: 'applications',
+    'joined-events': 'joined-events',
+    certificates: 'certificates',
+    evaluations: 'evaluations',
+    documentations: 'documentations',
     accounts: 'accounts',
     reports: 'reports',
     notifications: 'notifications'
@@ -23,8 +28,11 @@ const appBasePath = scriptBasePath.replace(/\/$/, '');
 let csrfToken = '';
 let currentUser = null;
 let currentPage = 'overview';
+let currentEventId = null;
 let qrStream = null;
 let qrTimer = 0;
+let qrVideo = null;
+let qrTrigger = null;
 
 function pageUrl(page) {
     const suffix = pageRoutes[page];
@@ -32,6 +40,7 @@ function pageUrl(page) {
 }
 
 function pageFromLocation() {
+    currentEventId = null;
     const legacyTab = new URLSearchParams(window.location.search).get('tab');
     if (Object.hasOwn(pageRoutes, legacyTab)) return legacyTab;
     let path = window.location.pathname.replace(/\/+$/, '');
@@ -40,7 +49,11 @@ function pageFromLocation() {
     } else if (appBasePath && path.startsWith(appBasePath)) {
         path = path.slice(appBasePath.length);
     }
-    const route = path.split('/').filter(Boolean)[0];
+    const segments = path.split('/').filter(Boolean);
+    const route = segments[0];
+    currentEventId = route === 'events' && /^\d+$/.test(segments[1] || '')
+        ? Number(segments[1])
+        : null;
     const page = Object.keys(pageRoutes).find(key => pageRoutes[key] === (route || ''));
     if (page) return page;
     return 'overview';
@@ -63,8 +76,21 @@ function navigateToPage(page, { replace = false } = {}) {
     if (window.location.pathname !== url || window.location.search || window.location.hash) {
         window.history[replace ? 'replaceState' : 'pushState']({ page }, '', url);
     }
+    currentEventId = null;
     syncNavigation(page);
     return renderPage(page);
+}
+
+function navigateToEvent(eventId) {
+    const id = Number(eventId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('A valid event is required.');
+    const url = `${pageUrl('events')}/${id}`;
+    if (window.location.pathname !== url) {
+        window.history.pushState({ page: 'events', eventId: id }, '', url);
+    }
+    currentEventId = id;
+    syncNavigation('events');
+    return renderPage('events');
 }
 
 async function request(path, options = {}) {
@@ -169,6 +195,11 @@ function enterApp(user) {
         const allowedRoles = item.dataset.roles?.split(',') || ['admin', 'partner', 'volunteer'];
         item.hidden = !allowedRoles.includes(user.role) || (item.classList.contains('admin-only') && user.role !== 'admin');
     });
+    const eventsLink = document.querySelector('.nav-item[data-page="events"]');
+    if (eventsLink) {
+        eventsLink.textContent = user.role === 'volunteer' ? 'Events' : 'Events & attendance';
+    }
+    document.querySelector('.notification-menu').hidden = user.role === 'volunteer';
     if (user.mustChangePassword) {
         renderPasswordChange();
         return;
@@ -176,7 +207,9 @@ function enterApp(user) {
     document.querySelector('.app-layout').classList.remove('password-change-mode');
     document.querySelector('#password-change-view').hidden = true;
     document.querySelector('.sidebar').hidden = false;
-    navigateToPage(pageFromLocation(), { replace: true });
+    const initialPage = pageFromLocation();
+    syncNavigation(initialPage);
+    renderPage(initialPage);
 }
 
 function renderPasswordChange() {
@@ -477,7 +510,9 @@ document.querySelector('#main-nav').addEventListener('click', event => {
 
 window.addEventListener('popstate', () => {
     if (!currentUser || currentUser.mustChangePassword) return;
-    navigateToPage(pageFromLocation(), { replace: true });
+    const page = pageFromLocation();
+    syncNavigation(page);
+    renderPage(page);
 });
 
 function setHeading(title, subtitle) {
@@ -494,13 +529,23 @@ async function renderPage(page) {
         proposals: ['admin', 'partner'],
         directory: ['admin', 'partner'],
         accounts: ['admin'],
-        reports: ['admin', 'partner']
+        reports: ['admin', 'partner'],
+        notifications: ['admin', 'partner'],
+        applications: ['volunteer'],
+        'joined-events': ['volunteer'],
+        certificates: ['volunteer'],
+        evaluations: ['volunteer'],
+        documentations: ['volunteer']
     };
     if (pageRoles[page] && !pageRoles[page].includes(currentUser.role)) {
         page = 'overview';
         if (pageFromLocation() !== page) {
             window.history.replaceState({ page }, '', pageUrl(page));
         }
+    }
+    if (page === 'events' && currentEventId && !['admin', 'partner'].includes(currentUser.role)) {
+        currentEventId = null;
+        window.history.replaceState({ page: 'events' }, '', pageUrl('events'));
     }
     stopQrCamera();
     currentPage = page;
@@ -511,7 +556,12 @@ async function renderPage(page) {
         overview: ['Overview', 'A quick view of your UCC-CES workspace.'],
         proposals: ['Proposals', 'Build, submit, and track community project proposals.'],
         directory: ['Partner directory', 'Find approved organizations across the community network.'],
-        events: ['Events & attendance', 'Coordinate volunteer applications and event-day attendance.'],
+        events: ['Events', 'Browse the event calendar and register for active community programs.'],
+        applications: ['My Applications', 'Track pending, approved, and declined event applications.'],
+        'joined-events': ['Joined Events', 'Review approved registrations and check in using event QR codes.'],
+        certificates: ['Certificates', 'View, download, and print certificates issued for your participation.'],
+        evaluations: ['Evaluation Reports', 'Share feedback and review your submitted post-event evaluations.'],
+        documentations: ['My Documentations', 'Upload and manage your field photos, reports, and accomplishments.'],
         reports: ['Project reports', 'Explore project activity with date-bounded, non-financial reporting.'],
         notifications: ['Notifications', 'Your latest system updates.']
     };
@@ -523,6 +573,11 @@ async function renderPage(page) {
         if (page === 'proposals') await renderProposals();
         if (page === 'directory') await renderDirectory();
         if (page === 'events') await renderEvents();
+        if (page === 'applications') await renderVolunteerApplications();
+        if (page === 'joined-events') await renderVolunteerJoinedEvents();
+        if (page === 'certificates') await renderVolunteerCertificates();
+        if (page === 'evaluations') await renderVolunteerEvaluations();
+        if (page === 'documentations') await renderVolunteerDocumentations();
         if (page === 'accounts') await renderAccounts();
         if (page === 'reports') await renderReports();
         if (page === 'notifications') await renderNotifications();
@@ -542,6 +597,10 @@ async function renderOverview() {
         renderPartnerOverview(overview.partnerDashboard);
         return;
     }
+    if (currentUser.role === 'volunteer') {
+        renderVolunteerOverview(overview.volunteerDashboard);
+        return;
+    }
     const cards = node('div', undefined, 'cards');
     const labels = currentUser.role === 'partner'
         ? [['proposals', 'Your proposals'], ['active', 'Active projects'], ['events', 'Events']]
@@ -554,6 +613,106 @@ async function renderOverview() {
     pageContent.append(cards);
     const welcome = panel(`Welcome, ${currentUser.firstName}`, 'Choose a workspace section to continue. Account approval and event enrollment are separate: approved volunteers still apply to each event.');
     pageContent.append(welcome);
+}
+
+function renderVolunteerOverview(dashboard) {
+    const { profile, counts, upcomingEvents, recentActivity } = dashboard;
+    const metrics = node('div', undefined, 'dashboard-metrics partner-dashboard-metrics');
+    [
+        ['Applications approved / active', counts.approved_applications, `${counts.applications} total application(s)`],
+        ['Attendance days', counts.attendance_days, 'Verified event check-ins'],
+        ['Rendered hours', `${Number(counts.rendered_hours || 0).toFixed(1)} hrs`, 'Based on attended activity schedules'],
+        ['Certificates & evaluations issued', Number(counts.certificates) + Number(counts.evaluations), `${counts.certificates} certificate(s) · ${counts.evaluations} evaluation(s)`]
+    ].forEach(([label, value, description]) => {
+        const card = node('article', undefined, 'metric-card dashboard-metric');
+        card.append(node('span', label, 'dashboard-metric-label'), node('strong', value), node('small', description));
+        if (label === 'Certificates & evaluations issued') {
+            card.tabIndex = 0;
+            card.setAttribute('role', 'button');
+            card.addEventListener('click', () => navigateToPage('certificates'));
+            card.addEventListener('keydown', event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    navigateToPage('certificates');
+                }
+            });
+        }
+        metrics.append(card);
+    });
+    pageContent.append(metrics);
+
+    const profilePanel = panel('Volunteer profile', 'Your classification and verification information.');
+    profilePanel.classList.add('volunteer-profile-panel');
+    const identity = node('div', undefined, 'record');
+    const identityInfo = node('div', undefined, 'record-main');
+    identityInfo.append(
+        node('strong', profile.registration_classification || volunteerTypeLabel(profile.volunteer_type)),
+        node('small', [profile.affiliation_name, profile.campus, profile.course_program].filter(Boolean).join(' · ') || 'Affiliation not specified')
+    );
+    identity.append(identityInfo, node('span', profile.verification_status, `badge status-badge status-${profile.account_status}`));
+    profilePanel.append(identity);
+    if (profile.student_number) profilePanel.append(node('p', `Student number: ${profile.student_number}`));
+    if (profile.faculty_id) profilePanel.append(node('p', `Faculty ID: ${profile.faculty_id}`));
+    if (profile.tanod_id) profilePanel.append(node('p', `Community ID: ${profile.tanod_id}`));
+    if (profile.year_section) profilePanel.append(node('p', `Year / section: ${profile.year_section}`));
+    if (profile.barangay) profilePanel.append(node('p', `Barangay: ${profile.barangay}`));
+    const proofStatus = node('div', undefined, 'record');
+    proofStatus.append(node('span', profile.proof_available ? 'Verification ID uploaded' : 'No verification ID on file', 'record-main'));
+    if (profile.proof_available) {
+        const proofLink = node('a', 'View uploaded ID', 'button button-quiet button-small');
+        proofLink.href = `${API}/volunteer/profile/proof`;
+        proofLink.target = '_blank';
+        proofLink.rel = 'noopener';
+        proofStatus.append(proofLink);
+    }
+    profilePanel.append(proofStatus);
+    pageContent.append(profilePanel);
+
+    const upcoming = panel('Upcoming joined events', 'Approved registrations with scheduled dates.');
+    if (!upcomingEvents.length) {
+        upcoming.append(node('div', 'No upcoming joined events yet. Browse opportunities to find a project.', 'empty'));
+    } else {
+        upcomingEvents.forEach(item => {
+            const row = node('article', undefined, 'record');
+            const info = node('div', undefined, 'record-main');
+            info.append(node('strong', item.title), node('small', `${item.project_title} · ${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}`));
+            row.append(info, button('View joined events', 'volunteer-joined-link', 'button button-quiet button-small'));
+            row.querySelector('[data-action]').addEventListener('click', () => navigateToPage('joined-events'));
+            if (item.venue) row.append(node('small', item.venue));
+            upcoming.append(row);
+        });
+    }
+    pageContent.append(upcoming);
+
+    const activity = panel('Recent activity', 'Your latest verified event check-ins.');
+    activity.classList.add('volunteer-activity-panel');
+    if (!recentActivity.length) {
+        activity.append(node('div', 'Your attendance check-ins will appear here after you join an event.', 'empty'));
+    } else {
+        recentActivity.forEach(item => {
+            const renderedHours = Number(item.rendered_hours || 0);
+            const record = node('article', undefined, 'record volunteer-activity-record');
+            const info = node('div', undefined, 'record-main');
+            info.append(
+                node('strong', item.event_title),
+                node('small', `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}${item.scanned_at ? ` · Checked in ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}`)
+            );
+            const indicator = node('span', `${renderedHours.toFixed(1)} hrs`, 'volunteer-activity-hours');
+            record.append(info, indicator);
+            activity.append(record);
+        });
+    }
+    pageContent.append(activity);
+}
+
+function volunteerTypeLabel(type) {
+    return ({
+        student: 'UCC Student',
+        professor: 'UCC Faculty',
+        tanod: 'External Guest / Community Resident',
+        civilian: 'External Guest / Community Resident',
+        other: 'Organization / Private Sector Representative'
+    })[type] || 'Volunteer';
 }
 
 function renderPartnerOverview(dashboard) {
@@ -973,7 +1132,9 @@ async function renderProposals() {
                 actions.append(button('Add document', `upload-${proposal.id}`, 'button button-quiet button-small'));
                 actions.append(button('Submit', `submit-${proposal.id}`, 'button button-primary button-small'));
             } else if (proposal.status === 'revision') {
+                actions.append(button('Edit Proposal', `editproposal-${proposal.id}`, 'button button-primary button-small'));
                 actions.append(button('Add document', `upload-${proposal.id}`, 'button button-quiet button-small'));
+                actions.append(button('Resubmit for Review', `submit-${proposal.id}`, 'button button-primary button-small'));
             }
         }
         if (currentUser.role === 'partner' && proposal.user_relationship === 'collaborator' && proposal.user_invitation_status === 'pending') {
@@ -986,10 +1147,12 @@ async function renderProposals() {
             actions.append(button('Invite partner', `invitepartner-${proposal.id}`, 'button button-quiet button-small'));
         }
         if (currentUser.role === 'admin' && ['submitted', 'under_review'].includes(proposal.status)) {
-            const reviewNote = node('input');
-            reviewNote.type = 'text';
+            const reviewNote = node('textarea');
+            reviewNote.rows = 2;
             reviewNote.maxLength = 2000;
-            reviewNote.placeholder = 'Optional review note';
+            reviewNote.placeholder = proposal.status === 'under_review'
+                ? 'Revision feedback (required when requesting changes)'
+                : 'Review note (required when requesting changes)';
             reviewNote.setAttribute('aria-label', `Review note for ${proposal.title}`);
             actions.append(reviewNote);
             if (proposal.status === 'submitted') actions.append(button('Start review', `review-${proposal.id}-under_review`));
@@ -1331,8 +1494,20 @@ async function editProposal(proposalId) {
         request(`/proposals/${proposalId}/edit-data`),
         request('/categories')
     ]);
-    const section = panel('Edit draft proposal', 'Update the Project Brief fields. Your existing selections are preserved.');
+    const isRevision = proposal.status === 'revision';
+    const section = panel(
+        isRevision ? 'Revise proposal' : 'Edit draft proposal',
+        isRevision
+            ? 'Update any section requested by CES Admin. Save your changes, attach updated documents if needed, then resubmit for review.'
+            : 'Update the Project Brief fields. Your existing selections are preserved.'
+    );
     section.classList.add('proposal-edit-panel');
+    if (isRevision && proposal.reviewNotes) {
+        const feedback = node('div', undefined, 'proposal-revision-feedback');
+        feedback.append(node('strong', 'Administrator feedback'));
+        feedback.append(node('p', proposal.reviewNotes));
+        section.append(feedback);
+    }
     const form = createProposalWizard(categories, proposal);
     form.querySelector('[data-wizard-submit]').textContent = 'Save Changes';
     const cancel = node('button', 'Cancel', 'button button-quiet');
@@ -1349,8 +1524,13 @@ async function editProposal(proposalId) {
                 body: JSON.stringify(serializeProposalWizard(form))
             });
             section.remove();
-            showMessage(pageMessage, 'Draft proposal updated.');
             await renderPage('proposals');
+            showMessage(
+                pageMessage,
+                isRevision
+                    ? 'Revision changes saved. Review your documents, then resubmit the proposal.'
+                    : 'Draft proposal updated.'
+            );
         } catch (error) {
             showMessage(pageMessage, error.message, 'error');
         } finally {
@@ -1744,7 +1924,17 @@ async function showPartnerProfile(partnerId, sectors) {
 }
 
 async function renderEvents() {
+    if (currentUser.role === 'volunteer') {
+        setHeading('Events', 'Browse the event calendar and register for active community programs.');
+        const { events } = await request('/events');
+        await renderVolunteerEvents(events);
+        return;
+    }
     if (currentUser.role === 'admin') {
+        if (currentEventId) {
+            await renderEventDetails(currentEventId);
+            return;
+        }
         const month = new Intl.DateTimeFormat('en-CA', {
             timeZone: 'Asia/Manila',
             year: 'numeric',
@@ -1754,76 +1944,23 @@ async function renderEvents() {
         renderAdminEventsDashboard(dashboard);
         return;
     }
-    if (currentUser.role === 'partner') {
-        const section = panel('Schedule an event', 'Create event dates and at least one activity for each date. Events require an approved project.');
-        const form = node('form', undefined, 'panel-form');
-        form.innerHTML = '<label>Approved project<select name="proposalId" required><option value="">Choose a project</option></select></label><label>Event title<input name="eventTitle" required></label><label>Volunteer capacity<input name="capacity" type="number" min="1" required></label><label>Applications open<input name="applicationsOpenAt" type="datetime-local"></label><label>Applications close<input name="applicationsCloseAt" type="datetime-local"></label><label class="wide">Description<textarea name="description" rows="2"></textarea></label><div class="wide event-date-list"></div><div class="wide event-form-actions"><button class="button button-quiet" type="button" data-add-date>Add event date</button><button class="button button-primary" type="submit">Create event</button></div>';
-        const { proposals } = await request('/proposals');
-        proposals.filter(proposal => ['approved', 'active'].includes(proposal.status) &&
-            (Number(proposal.owner_user_id) === currentUser.id || proposal.user_invitation_status === 'accepted'))
-            .forEach(proposal => form.elements.proposalId.add(new Option(proposal.title, proposal.id)));
-        const dateList = form.querySelector('.event-date-list');
-        addEventDateEditor(dateList);
-        form.querySelector('[data-add-date]').addEventListener('click', () => addEventDateEditor(dateList));
-        form.addEventListener('submit', async event => {
-            event.preventDefault();
-            const values = Object.fromEntries(new FormData(form));
-            const dateEditors = Array.from(dateList.querySelectorAll('.event-date-editor'));
-            const dateValues = dateEditors.map(dateEditor => dateEditor.querySelector('[name="date"]').value);
-            if (!dateEditors.length || dateValues.some(date => !date) || new Set(dateValues).size !== dateValues.length) {
-                showMessage(pageMessage, 'Add at least one unique event date.', 'error');
-                return;
-            }
-            const payload = {
-                proposalId: values.proposalId,
-                title: values.eventTitle,
-                capacity: Number(values.capacity),
-                description: values.description,
-                applicationsOpenAt: values.applicationsOpenAt,
-                applicationsCloseAt: values.applicationsCloseAt,
-                dates: dateEditors.map(dateEditor => ({
-                    date: dateEditor.querySelector('[name="date"]').value,
-                    activities: Array.from(dateEditor.querySelectorAll('.event-activity-editor'), activityEditor => {
-                        const activity = Object.fromEntries(Array.from(activityEditor.querySelectorAll('[name]'), input => [input.name, input.value]));
-                        activity.targetParticipants = activity.targetParticipants === '' ? null : Number(activity.targetParticipants);
-                        return activity;
-                    })
-                }))
-            };
-            try {
-                await request('/events', { method: 'POST', body: JSON.stringify(payload) });
-                await renderPage('events');
-                showMessage(pageMessage, 'Event scheduled.');
-            } catch (error) {
-                showMessage(pageMessage, error.message, 'error');
-            }
-        });
-        section.append(form);
-        pageContent.append(section);
-    } else if (currentUser.role === 'volunteer') {
-        const scan = panel('Record attendance', 'Paste the event-date QR payload after scanning it with a QR reader.');
-        const form = node('form', undefined, 'scan-form');
-        form.innerHTML = '<label>QR payload<input name="payload" placeholder=\'{"eventDateId":1,"token":"…"}\' required></label><button class="button button-quiet" type="button" data-action="camera">Use camera</button><video id="qr-camera" class="qr-camera" playsinline muted hidden></video><button class="button button-primary" type="submit">Check in</button>';
-        form.addEventListener('submit', async event => {
-            event.preventDefault();
-            try {
-                const parsed = JSON.parse(new FormData(form).get('payload'));
-                await request('/attendance/scan', { method: 'POST', body: JSON.stringify(parsed) });
-                showMessage(pageMessage, 'Attendance recorded.');
-                form.reset();
-            } catch (error) {
-                showMessage(pageMessage, error instanceof SyntaxError ? 'Enter a valid QR payload.' : error.message, 'error');
-            }
-        });
-        scan.append(form);
-        pageContent.append(scan);
+    if (currentUser.role === 'partner' && currentEventId) {
+        await renderEventDetails(currentEventId);
+        return;
     }
     const { events } = await request('/events');
     if (!events.length) {
-        pageContent.append(node('div', currentUser.role === 'partner' ? 'No events have been scheduled for your projects yet.' : 'No active project events are available.', 'empty'));
         if (currentUser.role === 'partner') {
+            renderPartnerEventsList(events);
             await renderPartnerEventsDashboard(events);
+        } else {
+            pageContent.append(node('div', 'No active project events are available.', 'empty'));
         }
+        return;
+    }
+    if (currentUser.role === 'partner') {
+        renderPartnerEventsList(events);
+        await renderPartnerEventsDashboard(events);
         return;
     }
     const list = node('div', undefined, 'record-list');
@@ -1843,18 +1980,26 @@ async function renderEvents() {
         const actions = node('div', undefined, 'record-actions');
         if (currentUser.role === 'volunteer') {
             if (!item.application_status && Number(item.approved_applications) < Number(item.capacity)) {
-                actions.append(button('Apply', `apply-${item.id}`, 'button button-primary button-small'));
+                actions.append(button('Register as Volunteer', `apply-${item.id}`, 'button button-primary button-small'));
             }
-            actions.append(button('Event dates', `dates-${item.id}`, 'button button-quiet button-small'));
-            actions.append(button('My certificates', `certificates-${item.id}`));
+            if (item.application_status) {
+                actions.append(node('span', `Application: ${item.application_status}`, `badge status-badge status-${item.application_status}`));
+            }
+            actions.append(button('My certificates', `certificates-${item.id}`, 'button button-quiet button-small'));
         } else if (currentUser.role === 'partner') {
             actions.append(
+                button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
                 button('Attendees', `attendees-${item.id}`, 'button button-quiet button-small'),
                 button('Dates / attendance', `dates-${item.id}`, 'button button-quiet button-small'),
                 button('Export attendance', `attendexport-${item.id}`, 'button button-quiet button-small')
             );
         } else {
-            actions.append(button('Applications', `applications-${item.id}`), button('Dates / attendance', `dates-${item.id}`), button('Certificates', `certificates-${item.id}`));
+            actions.append(
+                button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
+                button('Applications', `applications-${item.id}`),
+                button('Dates / attendance', `dates-${item.id}`),
+                button('Certificates', `certificates-${item.id}`)
+            );
         }
         record.append(info, actions);
         list.append(record);
@@ -1865,40 +2010,582 @@ async function renderEvents() {
     }
 }
 
-function renderAdminEventsDashboard(data) {
-    const metrics = node('section', undefined, 'admin-event-metrics');
-    [
-        ['scheduled_events', 'Scheduled / Ongoing Events', data.metrics.scheduled_events, 'Events with dates today or ahead'],
-        ['registered_volunteers', 'Registered Volunteers', data.metrics.registered_volunteers, 'Unique applicants across active programs'],
-        ['attendance_headcount', 'Attendance Headcount', data.metrics.attendance_headcount, 'Volunteers present and community participants'],
-        ['completed_programs', 'Completed Programs', data.metrics.completed_programs, 'All scheduled event dates have passed']
-    ].forEach(([key, label, value, hint]) => {
-        const card = node('article', undefined, 'admin-event-metric');
-        card.dataset.metric = key;
-        card.append(node('span', label), node('strong', Number(value || 0).toLocaleString()), node('small', hint));
-        metrics.append(card);
-    });
-    pageContent.append(metrics);
+async function renderVolunteerEvents(events) {
+    const calendarSection = panel('Calendar View', 'Active community extension activities scheduled this month.');
+    calendarSection.classList.add('volunteer-calendar-panel');
+    const calendar = node('div', undefined, 'partner-calendar');
+    calendarSection.append(calendar);
+    pageContent.append(calendarSection);
 
+    const renderCalendar = async month => {
+        calendar.replaceChildren(node('div', 'Loading events…', 'empty'));
+        try {
+            const data = await request(`/volunteer/calendar?month=${encodeURIComponent(month)}`);
+            const [year, monthNumber] = data.month.split('-').map(Number);
+            const first = new Date(year, monthNumber - 1, 1);
+            const daysInMonth = new Date(year, monthNumber, 0).getDate();
+            const offset = first.getDay();
+            const byDate = new Map();
+            data.events.forEach(item => {
+                const items = byDate.get(item.event_date) || [];
+                items.push(item);
+                byDate.set(item.event_date, items);
+            });
+            const toolbar = node('div', undefined, 'partner-calendar-toolbar');
+            const previous = button('Previous month', 'volunteer-calendar-previous', 'button button-quiet button-small');
+            const next = button('Next month', 'volunteer-calendar-next', 'button button-quiet button-small');
+            toolbar.append(previous, node('h3', new Intl.DateTimeFormat('en-PH', { month: 'long', year: 'numeric' }).format(first)), next);
+            const grid = node('div', undefined, 'partner-calendar-grid');
+            ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(day => grid.append(node('div', day, 'partner-calendar-weekday')));
+            for (let index = 0; index < offset; index++) grid.append(node('div', undefined, 'partner-calendar-day is-outside'));
+            for (let day = 1; day <= daysInMonth; day++) {
+                const date = `${data.month}-${String(day).padStart(2, '0')}`;
+                const cell = node('div', undefined, 'partner-calendar-day');
+                cell.append(node('span', day, 'partner-calendar-day-number'));
+                (byDate.get(date) || []).forEach(item => {
+                    const eventButton = button(item.title, `volcalendar-${item.id}`, `partner-calendar-event is-${item.event_status}`);
+                    eventButton.dataset.eventId = item.id;
+                    eventButton.title = `${item.project_title} · ${item.event_status}`;
+                    cell.append(eventButton);
+                });
+                grid.append(cell);
+            }
+            while ((grid.children.length - 7) % 7 !== 0) grid.append(node('div', undefined, 'partner-calendar-day is-outside'));
+            calendar.replaceChildren(toolbar, grid);
+            previous.addEventListener('click', () => {
+                const prior = new Date(year, monthNumber - 2, 1);
+                renderCalendar(`${prior.getFullYear()}-${String(prior.getMonth() + 1).padStart(2, '0')}`);
+            });
+            next.addEventListener('click', () => {
+                const later = new Date(year, monthNumber, 1);
+                renderCalendar(`${later.getFullYear()}-${String(later.getMonth() + 1).padStart(2, '0')}`);
+            });
+        } catch (error) {
+            calendar.replaceChildren(node('div', error.message, 'empty'));
+        }
+    };
+    await renderCalendar(new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit'
+    }).format(new Date()));
+
+    const listSection = panel('List View', 'Approved active events currently accepting volunteer registrations.');
+    const wrap = node('div', undefined, 'admin-event-table-wrap');
+    const table = node('table', undefined, 'admin-event-table');
+    table.classList.add('volunteer-event-table');
+    table.innerHTML = '<thead><tr><th>Event / Project</th><th>Date</th><th>Venue</th><th>Volunteers</th><th>Registration</th></tr></thead>';
+    const body = node('tbody');
+    if (!events.length) {
+        const row = node('tr');
+        const empty = node('td', 'No active events are currently open for volunteer registration.', 'admin-event-empty');
+        empty.colSpan = 5;
+        row.append(empty);
+        body.append(row);
+    }
+    events.forEach(item => {
+        const row = node('tr');
+        row.dataset.eventId = item.id;
+        const name = node('td', undefined, 'admin-event-name');
+        name.append(node('strong', item.title), node('small', item.project_title || 'Community extension event'));
+        const dates = item.date_start
+            ? item.date_start === item.date_end
+                ? dashboardDate(item.date_start, { month: 'short', day: 'numeric', year: 'numeric' })
+                : `${dashboardDate(item.date_start, { month: 'short', day: 'numeric', year: 'numeric' })} – ${dashboardDate(item.date_end, { month: 'short', day: 'numeric', year: 'numeric' })}`
+            : 'Date to be announced';
+        const count = `${Number(item.approved_applications || 0)} / ${Number(item.capacity || 0)}`;
+        const action = node('td', undefined, 'admin-event-action-cell');
+        if (item.application_status) {
+            action.append(node('span', item.application_status, `badge status-badge status-${item.application_status}`));
+        } else if (Number(item.approved_applications || 0) < Number(item.capacity || 0)) {
+            action.append(button('Register as Volunteer', `apply-${item.id}`, 'button button-primary button-small'));
+        } else {
+            action.append(node('span', 'Full', 'badge status-badge status-rejected'));
+        }
+        row.append(
+            name,
+            node('td', dates),
+            node('td', item.venues || 'Venue to be announced'),
+            node('td', count),
+            action
+        );
+        body.append(row);
+    });
+    table.append(body);
+    wrap.append(table);
+    listSection.append(wrap);
+    pageContent.append(listSection);
+}
+
+async function renderVolunteerApplications() {
+    const { applications, attendance } = await request('/volunteer/applications');
+    const section = panel('My Applications', 'Track pending, approved, and rejected event registrations.');
+    section.classList.add('volunteer-applications-panel');
+    const myApplications = applications.filter(application => application.status !== 'approved');
+    if (!myApplications.length) {
+        section.append(node('div', 'No pending or rejected applications. Browse Events to register for a program.', 'empty'));
+    }
+    const attendanceByEvent = new Map();
+    attendance.forEach(record => {
+        const records = attendanceByEvent.get(Number(record.event_id)) || [];
+        records.push(record);
+        attendanceByEvent.set(Number(record.event_id), records);
+    });
+    myApplications.forEach(application => {
+        const record = node('article', undefined, 'record volunteer-application-record');
+        const info = node('div', undefined, 'record-main');
+        const dates = application.date_start
+            ? application.date_start === application.date_end
+                ? dashboardDate(application.date_start, { month: 'short', day: 'numeric', year: 'numeric' })
+                : `${dashboardDate(application.date_start, { month: 'short', day: 'numeric', year: 'numeric' })} – ${dashboardDate(application.date_end, { month: 'short', day: 'numeric', year: 'numeric' })}`
+            : 'Dates to be announced';
+        info.append(
+            node('strong', application.event_title),
+            node('small', `${application.project_title} · ${dates} · Applied ${dashboardDate(application.applied_at, { month: 'short', day: 'numeric', year: 'numeric' })}`)
+        );
+        record.append(info, node('span', application.status, `badge status-badge status-${application.status}`));
+        const eventAttendance = attendanceByEvent.get(Number(application.event_id)) || [];
+        const attendanceInfo = eventAttendance.length
+            ? eventAttendance.map(item => `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}: ${item.status}${item.scanned_at ? ` · ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}`).join(' | ')
+            : 'No attendance has been recorded yet.';
+        record.append(node('small', `Attendance history: ${attendanceInfo}`, 'volunteer-attendance-history'));
+        section.append(record);
+    });
+    pageContent.append(section);
+}
+
+async function renderVolunteerJoinedEvents() {
+    const { applications, schedules = [] } = await request('/volunteer/applications');
+    const joined = applications.filter(application => application.status === 'approved');
+    const section = panel('Joined Events', 'Your approved registrations, event schedules, and secure event-day QR check-in.');
+    const tableWrap = node('div', undefined, 'volunteer-joined-table-wrap');
+    const table = node('table', undefined, 'volunteer-joined-table');
+    table.innerHTML = '<thead><tr><th scope="col">Event &amp; host</th><th scope="col">Scheduled date &amp; time</th><th scope="col">Attendance</th><th scope="col">Check-in</th></tr></thead>';
+    const body = node('tbody');
+    const scheduleByEvent = new Map();
+    schedules.forEach(schedule => {
+        const eventSchedules = scheduleByEvent.get(Number(schedule.event_id)) || [];
+        eventSchedules.push(schedule);
+        scheduleByEvent.set(Number(schedule.event_id), eventSchedules);
+    });
+    if (!joined.length) {
+        const emptyRow = node('tr');
+        const cell = node('td', 'Approved applications will appear here. Browse Events to register.', 'empty');
+        cell.colSpan = 4;
+        emptyRow.append(cell);
+        body.append(emptyRow);
+    }
+    joined.forEach(application => {
+        const eventSchedules = scheduleByEvent.get(Number(application.event_id)) || [];
+        const rows = eventSchedules.length ? eventSchedules : [null];
+        rows.forEach(schedule => {
+            const row = node('tr');
+            const eventCell = node('td');
+            eventCell.append(node('strong', application.event_title), node('small', `${application.project_title} · ${application.host_name || 'UCC CES'}`));
+            const scheduleCell = node('td');
+            if (schedule) {
+                const time = schedule.start_time
+                    ? `${schedule.start_time.slice(0, 5)} – ${schedule.end_time?.slice(0, 5) || '—'}`
+                    : 'Time to be announced';
+                scheduleCell.append(
+                    node('strong', dashboardDate(schedule.event_date, { month: 'short', day: 'numeric', year: 'numeric' })),
+                    node('small', [time, schedule.venue].filter(Boolean).join(' · '))
+                );
+            } else {
+                scheduleCell.textContent = 'Schedule to be announced';
+            }
+            const attendanceCell = node('td');
+            const status = schedule?.attendance_status || 'registered';
+            attendanceCell.append(node('span', status, `badge status-badge status-${status}`));
+            const actionCell = node('td');
+            if (schedule?.attendance_status === 'present') {
+                const present = button('Present', '', 'button button-small volunteer-present-button');
+                present.disabled = true;
+                actionCell.append(present);
+            } else if (schedule) {
+                const scan = button('Scan QR Code', '', 'button button-primary button-small');
+                scan.dataset.action = 'checkin-open';
+                scan.dataset.eventId = application.event_id;
+                scan.dataset.eventDateId = schedule.event_date_id;
+                actionCell.append(scan);
+            } else {
+                actionCell.append(node('span', 'No schedule yet', 'field-hint'));
+            }
+            row.append(eventCell, scheduleCell, attendanceCell, actionCell);
+            body.append(row);
+        });
+    });
+    table.append(body);
+    tableWrap.append(table);
+    section.append(tableWrap);
+    pageContent.append(section);
+}
+
+function openVolunteerCheckin(eventId, eventDateId) {
+    const dialog = node('dialog', undefined, 'volunteer-checkin-dialog');
+    const content = node('section', undefined, 'volunteer-checkin-modal');
+    const header = node('header', undefined, 'volunteer-checkin-header');
+    const heading = node('div');
+    heading.append(node('h2', 'Event QR check-in'), node('p', 'Scan the QR code for this scheduled event date to record your attendance.'));
+    const close = button('×', 'checkin-close', 'button button-quiet volunteer-checkin-close');
+    close.setAttribute('aria-label', 'Close QR scanner');
+    close.dataset.action = 'checkin-close';
+    header.append(heading, close);
+
+    const form = node('form', undefined, 'scan-form volunteer-checkin-form');
+    form.dataset.eventId = eventId;
+    form.dataset.expectedEventDateId = eventDateId;
+    const cameraButton = button('Check-in via Camera', 'camera', 'button button-primary');
+    cameraButton.type = 'button';
+    cameraButton.dataset.action = 'camera';
+    const video = node('video', undefined, 'qr-camera volunteer-checkin-video');
+    video.id = 'qr-camera';
+    video.setAttribute('playsinline', '');
+    video.muted = true;
+    video.hidden = true;
+    const status = node('p', 'Allow camera access when prompted, or enter the QR payload below.', 'volunteer-checkin-status');
+    status.setAttribute('aria-live', 'polite');
+    const payloadLabel = node('label', 'QR payload');
+    const payload = node('input');
+    payload.name = 'payload';
+    payload.placeholder = '{"eventDateId":1,"token":"…"}';
+    payload.autocomplete = 'off';
+    payload.required = true;
+    payloadLabel.append(payload);
+    const footer = node('div', undefined, 'volunteer-checkin-actions');
+    const cancel = button('Cancel', 'checkin-close', 'button button-quiet');
+    cancel.type = 'button';
+    cancel.dataset.action = 'checkin-close';
+    const submit = button('Verify & Check in', '', 'button button-primary');
+    submit.type = 'submit';
+    footer.append(cancel, submit);
+    form.append(cameraButton, video, status, payloadLabel, footer);
+    content.append(header, form);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="checkin-close"]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => {
+        if (qrStream) stopQrCamera();
+        dialog.remove();
+    }, { once: true });
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        status.textContent = 'Verifying the event QR code…';
+        status.className = 'volunteer-checkin-status';
+        submit.disabled = true;
+        try {
+            const parsed = JSON.parse(new FormData(form).get('payload'));
+            await request('/attendance/scan', {
+                method: 'POST',
+                body: JSON.stringify({
+                    ...parsed,
+                    eventId: Number(form.dataset.eventId),
+                    expectedEventDateId: Number(form.dataset.expectedEventDateId)
+                })
+            });
+            stopQrCamera();
+            status.textContent = 'Check-in successful! You are now marked Present for this event.';
+            status.classList.add('is-success');
+            window.setTimeout(async () => {
+                if (!dialog.isConnected || currentPage !== 'joined-events') return;
+                if (dialog.open) dialog.close();
+                await renderPage('joined-events');
+                showMessage(pageMessage, 'Check-in successful. Attendance is marked Present.');
+            }, 900);
+        } catch (error) {
+            status.textContent = error instanceof SyntaxError ? 'Enter a valid QR payload.' : error.message;
+            status.classList.add('is-error');
+            showMessage(pageMessage, status.textContent, 'error');
+        } finally {
+            submit.disabled = status.classList.contains('is-success');
+        }
+    });
+    pageContent.append(dialog);
+    dialog.showModal();
+}
+
+async function renderVolunteerCertificates() {
+    const { certificates } = await request('/volunteer/certificates');
+    const section = panel('Certificates', 'Official certificates of participation issued for events you attended.');
+    if (!certificates.length) section.append(node('div', 'No certificates have been issued to your account yet.', 'empty'));
+    certificates.forEach(item => {
+        const record = node('article', undefined, 'record');
+        const info = node('div', undefined, 'record-main');
+        info.append(node('strong', item.event_title), node('small', `${item.project_title} · Issued ${dashboardDate(item.issued_at, { month: 'short', day: 'numeric', year: 'numeric' })}`));
+        const actions = node('div', undefined, 'record-actions');
+        const download = node('a', 'Download', 'button button-quiet button-small');
+        download.href = `${API}/certificates/${item.id}`;
+        const print = node('a', 'Open / Print', 'button button-primary button-small');
+        print.href = `${API}/certificates/${item.id}?view=1`;
+        print.target = '_blank';
+        print.rel = 'noopener';
+        actions.append(download, print);
+        record.append(info, actions);
+        section.append(record);
+    });
+    pageContent.append(section);
+}
+
+async function renderVolunteerEvaluations() {
+    const { evaluations, eligibleEvents } = await request('/volunteer/evaluations');
+    const section = panel('Evaluation Reports', 'Submit post-event feedback after attending an event, and review your previous submissions.');
+    if (eligibleEvents.length) {
+        const form = node('form', undefined, 'panel-form volunteer-evaluation-form');
+        form.innerHTML = '<label>Completed event<select name="eventId" required><option value="">Choose an event</option></select></label><label>Rating<select name="rating" required><option value="">Select 1–5</option><option value="5">5 — Excellent</option><option value="4">4 — Very good</option><option value="3">3 — Good</option><option value="2">2 — Fair</option><option value="1">1 — Needs improvement</option></select></label><label>Feedback<textarea name="feedback" rows="4" maxlength="5000" required></textarea></label><button class="button button-primary" type="submit">Submit Evaluation</button>';
+        eligibleEvents.forEach(item => form.elements.eventId.add(new Option(`${item.title} · ${item.project_title}`, item.id)));
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            const submit = form.querySelector('[type="submit"]');
+            submit.disabled = true;
+            try {
+                await request('/volunteer/evaluations', {
+                    method: 'POST',
+                    body: JSON.stringify(Object.fromEntries(new FormData(form)))
+                });
+                await renderVolunteerEvaluations();
+                showMessage(pageMessage, 'Your event evaluation was submitted.');
+            } catch (error) {
+                showMessage(pageMessage, error.message, 'error');
+                submit.disabled = false;
+            }
+        });
+        section.append(form);
+    } else {
+        section.append(node('p', 'An event will become eligible for evaluation after your approved attendance is recorded.'));
+    }
+    const history = panel('Submitted evaluations');
+    if (!evaluations.length) history.append(node('div', 'No evaluations submitted yet.', 'empty'));
+    evaluations.forEach(item => {
+        const record = node('article', undefined, 'record volunteer-application-record');
+        record.append(
+            node('div', `${item.event_title} · ${item.project_title}`, 'record-main'),
+            node('span', `${item.rating} / 5`, 'badge'),
+            node('small', `${item.feedback} · ${dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })}`, 'volunteer-attendance-history')
+        );
+        history.append(record);
+    });
+    pageContent.append(section, history);
+}
+
+async function renderVolunteerDocumentations() {
+    const { documentations } = await request('/volunteer/documentations');
+    const section = panel('My Documentations', 'Upload and manage your event photos, reports, and accomplishments. Files are private to your account.');
+    const form = node('form', undefined, 'panel-form volunteer-documentation-form');
+    form.innerHTML = '<label>Documentation type<select name="type" required><option value="">Choose a type</option><option value="photo">Field photo</option><option value="report">Report</option><option value="accomplishment">Accomplishment</option><option value="other">Other</option></select></label><label>Caption / description<input name="description" maxlength="500"></label><label>File (PDF, JPG, PNG; max 10 MB)<input name="file" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></label><button class="button button-primary" type="submit">Upload Documentation</button>';
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        try {
+            await request('/volunteer/documentations', { method: 'POST', body: new FormData(form) });
+            await renderVolunteerDocumentations();
+            showMessage(pageMessage, 'Documentation uploaded to your private portfolio.');
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+            submit.disabled = false;
+        }
+    });
+    section.append(form);
+    if (!documentations.length) section.append(node('div', 'No field documentation uploaded yet.', 'empty'));
+    documentations.forEach(item => {
+        const record = node('article', undefined, 'record volunteer-documentation-record');
+        const details = node('div', undefined, 'record-main');
+        details.append(
+            node('strong', item.original_name),
+            node('small', `${item.documentation_type} · ${(Number(item.file_size) / 1024).toFixed(1)} KB · ${dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })}${item.description ? ` · ${item.description}` : ''}`)
+        );
+        const actions = node('div', undefined, 'record-actions');
+        const view = node('a', 'View / Download', 'button button-quiet button-small');
+        view.href = `${API}/volunteer/documentations/${item.id}/file`;
+        view.target = '_blank';
+        view.rel = 'noopener';
+        actions.append(view, button('Delete', `deletedoc-${item.id}`, 'button button-danger button-small'));
+        if (item.mime_type?.startsWith('image/')) {
+            const preview = node('img', undefined, 'volunteer-documentation-preview');
+            preview.src = view.href;
+            preview.alt = `Preview of ${item.original_name}`;
+            record.append(preview);
+        }
+        record.append(details, actions);
+        section.append(record);
+    });
+    pageContent.append(section);
+}
+
+function renderPartnerEventsList(events) {
+    const section = panel('Events List', 'Scheduled events linked to your organization and approved projects.');
+    section.classList.add('admin-event-management-panel');
+    const wrap = node('div', undefined, 'admin-event-table-wrap');
+    const table = node('table', undefined, 'admin-event-table');
+    table.innerHTML = '<thead><tr><th>Event / Project</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Status</th><th>Actions</th></tr></thead>';
+    const tbody = node('tbody');
+    if (!events.length) {
+        const row = node('tr');
+        const empty = node('td', 'No events are currently linked to your organization.', 'admin-event-empty');
+        empty.colSpan = 7;
+        row.append(empty);
+        tbody.append(row);
+    }
+    events.forEach(item => {
+        const row = node('tr');
+        const title = node('td', undefined, 'admin-event-name');
+        title.append(node('strong', item.title), node('small', item.project_title || ''));
+        const start = item.date_start ? dashboardDate(item.date_start, { month: 'short', day: 'numeric', year: 'numeric' }) : 'No event dates';
+        const end = item.date_end ? dashboardDate(item.date_end, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+        const schedule = node('td', undefined, 'admin-event-schedule');
+        schedule.append(
+            node('span', end && start !== end ? `${start} – ${end}` : start),
+            node('small', item.start_time ? `${String(item.start_time).slice(0, 5)} – ${String(item.end_time || '').slice(0, 5)}` : 'Time not set')
+        );
+        const actions = node('div', undefined, 'admin-event-actions');
+        if (item.is_project_proposal) {
+            actions.append(button('View project details', `dossier-${item.proposal_id}`, 'button button-primary button-small'));
+        } else {
+            actions.append(
+                button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
+                button('Attendance', `dates-${item.id}`, 'button button-quiet button-small'),
+                button('Export CSV', `attendexport-${item.id}`, 'button button-quiet button-small')
+            );
+        }
+        row.append(
+            title,
+            node('td', item.partner_name || 'UCC / University program'),
+            schedule,
+            node('td', item.venues || 'Venue not set', 'admin-event-venue'),
+            node('td', Number(item.approved_applications || 0).toLocaleString()),
+            node('td', undefined, 'admin-event-status-cell'),
+            node('td', undefined, 'admin-event-action-cell')
+        );
+        row.children[5].append(node('span', item.event_status, `badge status-badge event-status-${item.event_status}`));
+        row.children[6].append(actions);
+        tbody.append(row);
+    });
+    table.append(tbody);
+    wrap.append(table);
+    section.append(wrap);
+    pageContent.append(section);
+}
+
+async function renderEventDetails(eventId) {
+    const { event } = await request(`/events/${eventId}/details`);
+    setHeading(event.title, `${event.project_title} · Event details`);
+    const back = button('← Back to Events', 'back-to-events', 'button button-quiet event-detail-back');
+    pageContent.append(back);
+
+    const header = node('section', undefined, 'event-detail-hero');
+    const heading = node('div', undefined, 'event-detail-hero-heading');
+    heading.append(
+        node('p', 'UCC-CES EVENT', 'eyebrow'),
+        node('h2', event.title),
+        node('p', event.description || 'No additional event description provided.')
+    );
+    const todayParts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Manila',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).formatToParts(new Date()).reduce((values, part) => {
+        if (part.type !== 'literal') values[part.type] = part.value;
+        return values;
+    }, {});
+    const today = `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
+    const statusValue = event.dates.some(date => date.event_date === today)
+        ? 'ongoing'
+        : (event.dates.some(date => date.event_date > today)
+            ? 'upcoming'
+            : 'completed');
+    const statusBadge = node('span', statusValue, `badge status-badge event-status-${statusValue}`);
+    header.append(heading, statusBadge);
+    pageContent.append(header);
+
+    const dates = event.dates || [];
+    const dateStart = dates[0]?.event_date || event.period_start;
+    const dateEnd = dates[dates.length - 1]?.event_date || event.period_end;
+    const dateRange = dateStart
+        ? `${dashboardDate(dateStart, { month: 'short', day: 'numeric', year: 'numeric' })}${dateEnd && dateEnd !== dateStart ? ` – ${dashboardDate(dateEnd, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}`
+        : 'No event dates';
+    const summary = node('section', undefined, 'event-detail-metrics');
+    [
+        ['Registered volunteers', event.registered_volunteers],
+        ['Attendance headcount', event.attendance_headcount],
+        ['Volunteer capacity', event.capacity]
+    ].forEach(([label, value]) => {
+        const metric = node('article', undefined, 'event-detail-metric');
+        metric.append(node('span', label), node('strong', Number(value || 0).toLocaleString()));
+        summary.append(metric);
+    });
+    pageContent.append(summary);
+
+    const details = panel('Event Information');
+    details.classList.add('event-detail-panel');
+    const detailGrid = node('dl', undefined, 'event-detail-grid');
+    [
+        ['Project', event.project_title],
+        ['Host partner / department', event.partner_name || 'UCC / University program'],
+        ['Date range', dateRange],
+        ['Time range', dates.some(date => date.start_time)
+            ? `${dates.find(date => date.start_time).start_time.slice(0, 5)} – ${[...dates].reverse().find(date => date.end_time)?.end_time?.slice(0, 5) || '—'}`
+            : 'Not specified'],
+        ['Venue / location', [...new Set(dates.flatMap(date => (date.venues || '').split(', ').filter(Boolean)))].join(', ') || 'Not specified'],
+        ['Proposal status', String(event.proposal_status || '').replaceAll('_', ' ')],
+        ['Volunteer application window', event.applications_open_at || event.applications_close_at
+            ? `${event.applications_open_at || 'Open'} – ${event.applications_close_at || 'No closing date'}`
+            : 'Not specified']
+    ].forEach(([label, value]) => {
+        detailGrid.append(node('dt', label), node('dd', value || 'Not specified'));
+    });
+    details.append(detailGrid);
+    const actions = node('div', undefined, 'event-detail-actions');
+    actions.append(
+        button('Manage Volunteers', `applications-${event.id}`, 'button button-primary button-small'),
+        button('View Attendance Log', `dates-${event.id}`, 'button button-quiet button-small'),
+        button('Export Attendance CSV', `attendexport-${event.id}`, 'button button-quiet button-small'),
+        button('Print / Save as PDF', 'print-event-detail', 'button button-quiet button-small')
+    );
+    details.append(actions);
+    pageContent.append(details);
+
+    const qrPanel = panel('Attendee Check-in QR Codes', 'Each QR code is tied to a single event date. Approved volunteers can scan the code on that date to record attendance.');
+    qrPanel.classList.add('event-detail-qr-panel');
+    const qrCards = node('div', undefined, 'event-detail-qr-grid');
+    if (!['approved', 'active'].includes(event.proposal_status)) {
+        qrCards.append(node('p', 'Check-in QR codes are available for approved or active projects with scheduled dates.', 'empty'));
+    } else if (!dates.length) {
+        qrCards.append(node('p', 'No event dates are scheduled, so check-in QR codes are not available.', 'empty'));
+    } else {
+        dates.forEach(date => {
+            const card = node('article', undefined, 'event-detail-qr-card');
+            card.append(node('h3', dashboardDate(date.event_date, { month: 'long', day: 'numeric', year: 'numeric' })));
+            const timeVenue = [date.start_time ? `${date.start_time.slice(0, 5)} – ${date.end_time?.slice(0, 5) || '—'}` : '', date.venues || ''].filter(Boolean).join(' · ');
+            if (timeVenue) card.append(node('p', timeVenue));
+            const loading = node('div', 'Preparing secure QR code…', 'event-detail-qr-loading');
+            card.append(loading);
+            qrCards.append(card);
+            request(`/event-dates/${date.id}/qr`).then(result => {
+                const image = node('img');
+                image.src = result.qrImage;
+                image.alt = `Attendance check-in QR code for ${event.title} on ${result.date}`;
+                image.className = 'event-detail-qr-image';
+                const download = node('a', 'Download QR image', 'button button-quiet button-small');
+                download.href = result.qrImage;
+                download.download = `ucc-ces-event-${event.id}-${result.date}-qr.png`;
+                download.setAttribute('aria-label', `Download QR code for ${result.date}`);
+                loading.replaceWith(image, download);
+            }).catch(error => {
+                loading.className = 'event-detail-qr-error';
+                loading.textContent = `QR code unavailable: ${error.message}`;
+            });
+        });
+    }
+    qrPanel.append(qrCards);
+    pageContent.append(qrPanel);
+}
+
+function renderAdminEventsDashboard(data) {
     const calendarPanel = panel('Calendar of Events', 'Approved and active university and partner extension activities.');
     calendarPanel.classList.add('admin-event-calendar-panel');
     const calendar = node('div', undefined, 'admin-event-calendar');
     calendarPanel.append(calendar);
     pageContent.append(calendarPanel);
-
-    const volunteerPanel = panel('Volunteer Applications', 'Review registrations and volunteer affiliations for each community project.');
-    volunteerPanel.classList.add('admin-volunteer-review-panel');
-    const volunteerList = node('div', undefined, 'admin-volunteer-review-list');
-    if (!data.events.length) volunteerList.append(node('div', 'No approved or active events are available.', 'empty'));
-    data.events.forEach(item => {
-        const record = node('article', undefined, 'admin-volunteer-review-row');
-        const info = node('div', undefined, 'record-main');
-        info.append(node('strong', item.title), node('small', `${item.project_title} · ${item.partner_name || 'UCC / University program'}`));
-        record.append(info, button('Review volunteers', `applications-${item.id}`, 'button button-quiet button-small'));
-        volunteerList.append(record);
-    });
-    volunteerPanel.append(volunteerList);
-    pageContent.append(volunteerPanel);
 
     const eventsPanel = panel('Event Management', 'Filter the university-wide event register and open attendance or volunteer records.');
     eventsPanel.classList.add('admin-event-management-panel');
@@ -1964,12 +2651,17 @@ function renderAdminEventsDashboard(data) {
             const attendance = Number(item.attendance_headcount || 0);
             const statusBadge = node('span', item.event_status, `badge status-badge event-status-${item.event_status}`);
             const actions = node('div', undefined, 'admin-event-actions');
-            actions.append(
-                button('View Attendance Log', `dates-${item.id}`, 'button button-quiet button-small'),
-                button('Manage Volunteers', `applications-${item.id}`, 'button button-quiet button-small'),
-                button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'),
-                button('Print / PDF', `attendanceprint-${item.id}`, 'button button-quiet button-small')
-            );
+            if (item.is_project_proposal) {
+                actions.append(button('View project details', `dossier-${item.proposal_id}`, 'button button-quiet button-small'));
+            } else {
+                actions.append(
+                    button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
+                    button('View Attendance Log', `dates-${item.id}`, 'button button-quiet button-small'),
+                    button('Manage Volunteers', `applications-${item.id}`, 'button button-quiet button-small'),
+                    button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'),
+                    button('Print / PDF', `attendanceprint-${item.id}`, 'button button-quiet button-small')
+                );
+            }
             row.append(
                 eventCell,
                 partnerCell,
@@ -2000,64 +2692,12 @@ async function refreshAdminEventSummary() {
         month: '2-digit'
     }).format(new Date());
     const data = await request(`/events/admin-dashboard?month=${encodeURIComponent(month)}`);
-    Object.entries(data.metrics).forEach(([key, value]) => {
-        const card = pageContent.querySelector(`.admin-event-metric[data-metric="${key}"]`);
-        if (card) card.querySelector('strong').textContent = Number(value || 0).toLocaleString();
-    });
     data.events.forEach(item => {
         const row = pageContent.querySelector(`.admin-event-table tr[data-event-id="${item.id}"]`);
         if (!row) return;
         row.children[4].textContent = Number(item.registered_volunteers || 0).toLocaleString();
         row.children[5].textContent = Number(item.attendance_headcount || 0).toLocaleString();
     });
-}
-
-function showAdminCalendarEvent(item) {
-    document.querySelector('#admin-calendar-event-modal')?.remove();
-    const dialog = node('dialog', undefined, 'admin-calendar-event-modal');
-    dialog.id = 'admin-calendar-event-modal';
-    dialog.setAttribute('aria-labelledby', 'admin-calendar-event-title');
-    const content = node('div', undefined, 'admin-calendar-event-content');
-    const header = node('header', undefined, 'admin-calendar-event-header');
-    const heading = node('div');
-    heading.append(node('p', 'COMMUNITY EXTENSION EVENT', 'eyebrow'));
-    const title = node('h2', item.title);
-    title.id = 'admin-calendar-event-title';
-    const status = node('span', item.event_status, `badge status-badge event-status-${item.event_status}`);
-    heading.append(title, status);
-    const close = button('×', 'close-admin-event-summary', 'button button-quiet admin-calendar-event-close');
-    close.setAttribute('aria-label', 'Close event details');
-    header.append(heading, close);
-
-    const date = dashboardDate(item.event_date, { month: 'long', day: 'numeric', year: 'numeric' });
-    const time = item.start_time ? `${String(item.start_time).slice(0, 5)} – ${String(item.end_time || '').slice(0, 5)}` : 'Time not set';
-    const details = node('dl', undefined, 'admin-calendar-event-details');
-    [
-        ['Project', item.project_title || '—'],
-        ['Date & time', `${date} · ${time}`],
-        ['Venue / location', item.venues || 'Venue not set'],
-        ['Host partners / departments', item.partner_name || 'UCC / University program'],
-        ['Registered volunteers', Number(item.registered_volunteers || 0).toLocaleString()],
-        ['Attendance headcount', Number(item.attendance_headcount || 0).toLocaleString()]
-    ].forEach(([label, value]) => {
-        details.append(node('dt', label), node('dd', value));
-    });
-    const footer = node('footer', undefined, 'admin-calendar-event-footer');
-    const attendance = button('View full attendance logs', `calendar-event-attendance-${item.id}`, 'button button-primary');
-    const done = button('Close', 'close-admin-event-summary', 'button button-quiet');
-    footer.append(attendance, done);
-    content.append(header, details, footer);
-    dialog.append(content);
-    dialog.addEventListener('click', event => {
-        if (event.target === dialog || event.target.closest('[data-action="close-admin-event-summary"]')) dialog.close();
-        if (event.target.closest(`[data-action="calendar-event-attendance-${item.id}"]`)) {
-            dialog.close();
-            showDates(Number(item.id)).catch(error => showMessage(pageMessage, error.message, 'error'));
-        }
-    });
-    dialog.addEventListener('close', () => dialog.remove(), { once: true });
-    document.body.append(dialog);
-    dialog.showModal();
 }
 
 function renderAdminEventCalendar(container, month, events) {
@@ -2080,8 +2720,17 @@ function renderAdminEventCalendar(container, month, events) {
     for (let day = 1; day <= daysInMonth; day++) {
         const date = `${month}-${String(day).padStart(2, '0')}`;
         const cell = node('div', undefined, 'admin-event-calendar-day');
+        const dayEvents = eventsByDate.get(date) || [];
+        const statuses = dayEvents.map(event => event.event_status);
+        const calendarStatus = statuses.includes('ongoing')
+            ? 'ongoing'
+            : (statuses.includes('upcoming') ? 'upcoming' : (statuses.includes('completed') ? 'completed' : ''));
+        if (calendarStatus) {
+            cell.classList.add(`has-${calendarStatus}-events`);
+            cell.dataset.eventStatus = calendarStatus;
+        }
         cell.append(node('span', day, 'admin-event-calendar-day-number'));
-        (eventsByDate.get(date) || []).forEach(item => {
+        dayEvents.forEach(item => {
             const eventButton = button('', `admin-calendar-event-${item.id}`, `admin-event-calendar-event event-status-${item.event_status}`);
             eventButton.append(
                 node('span', item.title, 'admin-event-calendar-title'),
@@ -2090,7 +2739,10 @@ function renderAdminEventCalendar(container, month, events) {
             eventButton.title = `${item.project_title}${item.partner_name ? ` · ${item.partner_name}` : ''} · ${item.event_status}`;
             eventButton.addEventListener('click', event => {
                 event.stopPropagation();
-                showAdminCalendarEvent(item).catch(error => showMessage(pageMessage, error.message, 'error'));
+                const destination = item.is_project_proposal
+                    ? showProjectDossier(Number(item.proposal_id))
+                    : navigateToEvent(Number(item.id));
+                destination.catch(error => showMessage(pageMessage, error.message, 'error'));
             });
             cell.append(eventButton);
         });
@@ -2118,26 +2770,6 @@ async function renderPartnerEventsDashboard(events) {
     const calendar = node('div', undefined, 'partner-calendar');
     calendarSection.append(calendar);
     pageContent.append(calendarSection);
-
-    const attendanceSection = panel('Attendance & attendee overview', 'Volunteer applications and community participant totals for events linked to your partner account.');
-    attendanceSection.classList.add('partner-attendance-panel');
-    if (!events.length) {
-        attendanceSection.append(node('div', 'Attendee records will appear when your organization has scheduled events.', 'empty'));
-    } else {
-        const attendeeList = node('div', undefined, 'record-list partner-attendee-event-list');
-        events.forEach(item => {
-            const record = node('article', undefined, 'record partner-attendee-event');
-            const info = node('div', undefined, 'record-main');
-            info.append(
-                node('strong', item.title),
-                node('small', `${item.project_title} · ${Number(item.approved_applications)} approved volunteers · capacity ${item.capacity}`)
-            );
-            record.append(info, button('View attendees', `attendees-${item.id}`, 'button button-quiet button-small'), button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'));
-            attendeeList.append(record);
-        });
-        attendanceSection.append(attendeeList);
-    }
-    pageContent.append(attendanceSection);
 
     const renderCalendar = async month => {
         calendar.replaceChildren(node('div', 'Loading calendar…', 'empty'));
@@ -2173,11 +2805,15 @@ async function renderPartnerEventsDashboard(events) {
                 (eventsByDate.get(date) || []).forEach(event => {
                     const eventButton = button(
                         event.title,
-                        event.visibility === 'partner' ? `calendar-event-${event.id}` : 'calendar-public-event',
-                        `partner-calendar-event is-${event.visibility}`
+                        event.visibility === 'partner'
+                            ? (event.is_project_proposal ? `calendar-project-${event.proposal_id}` : `calendar-event-${event.id}`)
+                            : 'calendar-public-event',
+                        `partner-calendar-event is-${event.visibility} is-${event.event_status || 'upcoming'}`
                     );
                     eventButton.title = `${event.project_title}${event.venue ? ` · ${event.venue}` : ''}`;
                     eventButton.dataset.eventId = event.id;
+                    eventButton.dataset.proposalId = event.proposal_id || '';
+                    eventButton.dataset.projectProposal = event.is_project_proposal ? 'true' : 'false';
                     eventButton.dataset.visibility = event.visibility;
                     eventButton.dataset.date = event.event_date;
                     cell.append(eventButton);
@@ -2203,7 +2839,10 @@ async function renderPartnerEventsDashboard(events) {
                 if (!target) return;
                 event.stopPropagation();
                 if (target.dataset.visibility === 'partner') {
-                    showDates(Number(target.dataset.eventId)).catch(error => showMessage(pageMessage, error.message, 'error'));
+                    const destination = target.dataset.projectProposal === 'true'
+                        ? showProjectDossier(Number(target.dataset.proposalId))
+                        : navigateToEvent(Number(target.dataset.eventId));
+                    destination.catch(error => showMessage(pageMessage, error.message, 'error'));
                 } else {
                     showMessage(pageMessage, `${target.textContent} · ${dashboardDate(target.dataset.date, { month: 'long', day: 'numeric', year: 'numeric' })} · Public UCC-CES event`);
                 }
@@ -2308,37 +2947,6 @@ function escapeReportText(value) {
     return String(value ?? '').replace(/[&<>"']/g, character => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     })[character]);
-}
-
-function addEventDateEditor(container) {
-    const editor = node('section', undefined, 'event-date-editor');
-    const heading = node('div', undefined, 'event-editor-heading');
-    heading.append(node('strong', 'Event date'));
-    const removeDate = button('Remove date', 'remove-date', 'button button-quiet button-small');
-    removeDate.addEventListener('click', () => editor.remove());
-    heading.append(removeDate);
-    const date = node('label', 'Date');
-    const dateInput = node('input');
-    dateInput.type = 'date';
-    dateInput.name = 'date';
-    dateInput.required = true;
-    date.append(dateInput);
-    const activityList = node('div', undefined, 'event-activity-list');
-    const addActivity = button('Add activity', 'add-activity', 'button button-quiet button-small');
-    addActivity.addEventListener('click', () => addEventActivityEditor(activityList));
-    editor.append(heading, date, activityList, addActivity);
-    addEventActivityEditor(activityList);
-    container.append(editor);
-}
-
-function addEventActivityEditor(container) {
-    const editor = node('div', undefined, 'event-activity-editor');
-    const fields = node('div', undefined, 'panel-form');
-    fields.innerHTML = '<label>Activity title<input name="title" required></label><label>Venue<input name="venue" required></label><label>Start time<input name="startTime" type="time" required></label><label>End time<input name="endTime" type="time" required></label><label>Target participants<input name="targetParticipants" type="number" min="0"></label><label>Activity lead<input name="activityLead"></label>';
-    const remove = button('Remove activity', 'remove-activity', 'button button-quiet button-small');
-    remove.addEventListener('click', () => editor.remove());
-    editor.append(fields, remove);
-    container.append(editor);
 }
 
 async function renderAccounts(status = 'pending') {
@@ -2792,12 +3400,24 @@ pageContent.addEventListener('click', async event => {
     const [action, id, value] = actionButton.dataset.action.split('-');
     actionButton.disabled = true;
     try {
-        if (action === 'submit') {
+        if (actionButton.dataset.action === 'back-to-events') {
+            navigateToPage('events');
+        } else if (action === 'checkin' && id === 'open') {
+            openVolunteerCheckin(Number(actionButton.dataset.eventId), Number(actionButton.dataset.eventDateId));
+        } else if (actionButton.dataset.action === 'print-event-detail') {
+            window.print();
+        } else if (action === 'viewevent') {
+            await navigateToEvent(Number(id));
+        } else if (action === 'submit') {
             await openSubmitConfirmation(Number(id));
         } else if (action === 'review') {
             const proposalId = actionButton.dataset.action.split('-')[1];
             const decision = actionButton.dataset.action.substring(`review-${proposalId}-`.length);
             const notes = actionButton.closest('tr')?.querySelector('[aria-label^="Review note for"]')?.value || '';
+            if (decision === 'revision' && !notes.trim()) {
+                showMessage(pageMessage, 'Add revision feedback before requesting changes.', 'error');
+                return;
+            }
             await request(`/proposals/${proposalId}/review`, { method: 'POST', body: JSON.stringify({ status: decision, notes }) });
             showMessage(pageMessage, 'Proposal status updated.');
             await renderPage('proposals');
@@ -2815,6 +3435,19 @@ pageContent.addEventListener('click', async event => {
             await request(`/events/${id}/apply`, { method: 'POST', body: '{}' });
             showMessage(pageMessage, 'Application submitted for organizer review.');
             await renderPage('events');
+        } else if (action === 'volcalendar') {
+            const row = pageContent.querySelector(`tr[data-event-id="${id}"]`);
+            if (row) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                row.classList.add('is-highlighted');
+                window.setTimeout(() => row.classList.remove('is-highlighted'), 1600);
+            } else {
+                showMessage(pageMessage, 'This active event is not currently open for volunteer registration.');
+            }
+        } else if (action === 'deletedoc') {
+            await request(`/volunteer/documentations/${id}`, { method: 'DELETE' });
+            await renderVolunteerDocumentations();
+            showMessage(pageMessage, 'Documentation deleted from your portfolio.');
         } else if (action === 'upload') {
             await openDocumentForm(Number(id));
         } else if (action === 'dates') {
@@ -3588,17 +4221,37 @@ async function showProjectDossier(projectId) {
 }
 
 async function startQrCamera(trigger) {
-    const video = pageContent.querySelector('#qr-camera');
-    const payloadInput = pageContent.querySelector('[name="payload"]');
+    const scope = trigger.closest('form') || pageContent;
+    const video = scope.querySelector('#qr-camera');
+    const payloadInput = scope.querySelector('[name="payload"]');
+    const cameraLabel = trigger.dataset.cameraLabel || trigger.textContent || 'Use camera';
+    trigger.dataset.cameraLabel = cameraLabel;
     if (qrStream) {
+        const activeTrigger = qrTrigger;
         stopQrCamera();
-        trigger.textContent = 'Use camera';
+        if (activeTrigger) activeTrigger.textContent = activeTrigger.dataset.cameraLabel || 'Use camera';
         return;
     }
     if (!('BarcodeDetector' in window) || !navigator.mediaDevices?.getUserMedia) {
+        const status = scope.querySelector('.volunteer-checkin-status');
+        if (status) {
+            status.textContent = 'QR camera scanning is not supported in this browser. Enter the QR payload instead.';
+            status.classList.add('is-error');
+        }
         throw new Error('QR camera scanning is not supported in this browser. Paste the QR payload instead.');
     }
-    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    try {
+        qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    } catch (error) {
+        const status = scope.querySelector('.volunteer-checkin-status');
+        if (status) {
+            status.textContent = `Camera unavailable: ${error.message}. Enter the QR payload instead.`;
+            status.classList.add('is-error');
+        }
+        throw error;
+    }
+    qrVideo = video;
+    qrTrigger = trigger;
     video.srcObject = qrStream;
     video.hidden = false;
     trigger.textContent = 'Stop camera';
@@ -3608,7 +4261,7 @@ async function startQrCamera(trigger) {
         detector = new BarcodeDetector({ formats: ['qr_code'] });
     } catch (error) {
         stopQrCamera();
-        trigger.textContent = 'Use camera';
+        trigger.textContent = cameraLabel;
         throw new Error(`Camera scanner could not be initialized: ${error.message}`);
     }
     const scan = async () => {
@@ -3618,13 +4271,13 @@ async function startQrCamera(trigger) {
             if (codes.length > 0) {
                 payloadInput.value = codes[0].rawValue;
                 stopQrCamera();
-                trigger.textContent = 'Use camera';
-                pageContent.querySelector('.scan-form').requestSubmit();
+                trigger.textContent = cameraLabel;
+                payloadInput.form?.requestSubmit();
                 return;
             }
         } catch (error) {
             stopQrCamera();
-            trigger.textContent = 'Use camera';
+            trigger.textContent = cameraLabel;
             showMessage(pageMessage, `QR scan failed: ${error.message}`, 'error');
             return;
         }
@@ -3638,11 +4291,13 @@ function stopQrCamera() {
     qrTimer = 0;
     if (qrStream) qrStream.getTracks().forEach(track => track.stop());
     qrStream = null;
-    const video = pageContent.querySelector('#qr-camera');
+    const video = qrVideo || pageContent.querySelector('#qr-camera');
     if (video) {
         video.srcObject = null;
         video.hidden = true;
     }
+    qrVideo = null;
+    qrTrigger = null;
 }
 
 loadSession();
