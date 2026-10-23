@@ -44,17 +44,22 @@ For existing installations, apply [`database/migrations/2026-10-24_proposal_proj
 
 For existing installations, apply [`database/migrations/2026-10-24_document_upload_remarks.sql`](./database/migrations/2026-10-24_document_upload_remarks.sql) once to store optional remarks alongside proposal attachments. The Proposal Register uses a modal uploader for PDF, DOCX, PNG, and JPG files up to 10 MB.
 
+For existing installations, apply [`database/migrations/2026-10-24_activity_logs.sql`](./database/migrations/2026-10-24_activity_logs.sql) once before deploying the updated API. Authentication and account, proposal, volunteer, and attendance workflows now write to the audit log.
+
 For a local PHP-only UI smoke test (without Apache), run `C:\xampp\php\php.exe -S 127.0.0.1:8027 -t C:\xampp\htdocs\CES\public C:\xampp\htdocs\CES\scripts\dev-router.php`.
 
 ## Implemented workflows
 
 - Two-step partner/volunteer account registration with role-specific verification uploads, admin approval, password hashing, session rotation, role checks, and CSRF-protected mutations.
 - Four-step Project Brief proposal drafts with co-proponents, activity components, server-calculated itemized budget totals, beneficiaries, outputs, risk/mitigation details, classifications/categories, document uploads, required-document submission checks, reviewer dossier inspection, and access-controlled printable PDF exports.
-- Browser-history-aware module routes (`/proposals`, `/events`, `/accounts`, `/reports`, `/notifications`) that restore the selected workspace after refresh and support Back/Forward navigation while retaining session-based authorization.
+- Browser-history-aware module routes (`/proposals`, `/events`, `/accounts`, `/reports`, `/evaluations`, `/event-history`, `/activity-logs`, `/profile`) that restore the selected workspace after refresh and support Back/Forward navigation while retaining session-based authorization.
 - Proposal collaborator invitations and responses, including integrated partner-account creation: CES Admin-created accounts are immediately approved and invited, while partner-created accounts remain pending until CES Admin approval. Pending accounts are excluded from collaborator choices.
 - Multi-partner project/event access, event scheduling, volunteer applications, date-locked QR attendance, organizer overrides, and an absence-marking CLI job.
 - Partner dashboards and event calendars scoped to owned or linked proposals/events, public active UCC-CES calendar context, linked-event attendee and participant summaries, and partner-authorized attendance CSV exports. Event dates, attendance, applications, certificates, and event-related reports are checked against event partnerships; administrator event views remain global.
 - The administrator Events & Attendance calendar and management table both include approved/active proposals without event records. Selecting a proposal-only management row creates its linked event schedule from the proposal date range and opens the dedicated event details page. Event details include scoped roster and attendance management, event metadata editing, attendance QR codes available on each scheduled date, and an evaluation QR code available only on the final scheduled date.
-- Scoped, date-required non-financial project reports with CSV/PDF exports, in-app notifications, and configurable SMTP email delivery.
+- Scoped, date-required system reports for proposals and budgets, partner involvement, events, volunteer applications and attendance, rendered volunteer hours/classifications, participant counts, evaluation ratings, certificates, and documentation, with CSV/PDF exports.
+- Reports refresh automatically as filters change, default to the current month-to-date, and group detailed filters and export actions in a compact responsive toolbar.
+- Role-scoped evaluation analytics, completed event/documentation archives, administrative activity logs with actor and IP information, and a self-service profile/security page.
+- In-app notifications and configurable SMTP email delivery.
 
 Run `C:\xampp\php\php.exe scripts\mark-absences.php` daily (after midnight Manila time) to record absences for approved volunteers on past event dates. Review production Apache, database backup, mail delivery, and QR rendering configuration before deployment.

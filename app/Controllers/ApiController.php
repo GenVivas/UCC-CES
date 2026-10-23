@@ -63,6 +63,21 @@ final class ApiController
         if ($path === '/password/change' && $method === 'POST') {
             $this->changePassword();
         }
+        if ($path === '/profile' && $method === 'GET') {
+            $this->profile();
+        }
+        if ($path === '/profile' && $method === 'PUT') {
+            $this->updateProfile();
+        }
+        if ($path === '/evaluation-reports' && $method === 'GET') {
+            $this->evaluationReports();
+        }
+        if ($path === '/event-history' && $method === 'GET') {
+            $this->eventHistory();
+        }
+        if ($path === '/activity-logs' && $method === 'GET') {
+            $this->activityLogs();
+        }
         if ($path === '/logout' && $method === 'POST') {
             session_destroy();
             Http::json(['message' => 'You have been signed out.']);
@@ -262,6 +277,18 @@ final class ApiController
         if (preg_match('#^/reports(?:/|$)#', $path)) {
             Http::requireRole('admin', 'partner');
         }
+        if ($path === '/evaluation-reports') {
+            Http::requireRole('admin', 'partner');
+        }
+        if ($path === '/activity-logs') {
+            Http::requireRole('admin');
+        }
+        if ($path === '/event-history') {
+            Http::requireRole('admin', 'partner', 'volunteer');
+        }
+        if ($path === '/profile') {
+            Http::requireRole('admin', 'partner', 'volunteer');
+        }
         if ($path === '/events/admin-dashboard') {
             Http::requireRole('admin');
         }
@@ -403,6 +430,7 @@ final class ApiController
         session_regenerate_id(true);
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         $_SESSION['user'] = $this->publicUser($user);
+        $this->logActivity('auth.login', 'user', (int) $user['id']);
         Http::json(['user' => $_SESSION['user'], 'csrfToken' => $_SESSION['csrf_token']]);
     }
 
@@ -433,10 +461,284 @@ final class ApiController
 
         $update = $this->db->prepare('UPDATE users SET password_hash = ?, password_change_required = 0 WHERE id = ?');
         $update->execute([password_hash($newPassword, PASSWORD_DEFAULT), (int) $sessionUser['id']]);
+        $this->logActivity('account.password_changed', 'user', (int) $sessionUser['id']);
         session_regenerate_id(true);
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         $_SESSION['user']['mustChangePassword'] = false;
         Http::json(['message' => 'Password changed successfully.', 'user' => $_SESSION['user'], 'csrfToken' => $_SESSION['csrf_token']]);
+    }
+
+    private function profile(): never
+    {
+        $user = Http::user();
+        $statement = $this->db->prepare(
+            "SELECT u.id, u.email, u.role, u.first_name, u.last_name, u.contact_number, u.created_at,
+                    p.organization_name, p.organization_type, p.official_designation,
+                    vp.registration_classification, vp.affiliation_name, vp.campus, vp.course_program,
+                    (vp.affiliation_proof_path IS NOT NULL) AS proof_available,
+                    u.account_status
+             FROM users u
+             LEFT JOIN partners p ON p.user_id = u.id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = u.id
+             WHERE u.id = ?"
+        );
+        $statement->execute([(int) $user['id']]);
+        $profile = $statement->fetch();
+        if (!$profile) {
+            throw new RuntimeException('Account profile was not found.', 404);
+        }
+        Http::json(['profile' => $profile]);
+    }
+
+    private function updateProfile(): never
+    {
+        $user = Http::user();
+        $data = Http::body();
+        $firstName = trim((string) ($data['firstName'] ?? ''));
+        $lastName = trim((string) ($data['lastName'] ?? ''));
+        $contact = trim((string) ($data['contactNumber'] ?? ''));
+        if ($firstName === '' || $lastName === '' || $contact === '' ||
+            mb_strlen($firstName, 'UTF-8') > 100 || mb_strlen($lastName, 'UTF-8') > 100 ||
+            mb_strlen($contact, 'UTF-8') > 40) {
+            throw new RuntimeException('Enter a first name, last name, and contact number within the allowed lengths.');
+        }
+        $this->db->beginTransaction();
+        $passwordChanged = false;
+        try {
+            $update = $this->db->prepare('UPDATE users SET first_name = ?, last_name = ?, contact_number = ? WHERE id = ?');
+            $update->execute([$firstName, $lastName, $contact, (int) $user['id']]);
+            if ($user['role'] === 'partner') {
+                $organization = trim((string) ($data['organizationName'] ?? ''));
+                $designation = trim((string) ($data['officialDesignation'] ?? ''));
+                if ($organization === '' || mb_strlen($organization, 'UTF-8') > 190 ||
+                    mb_strlen($designation, 'UTF-8') > 190) {
+                    throw new RuntimeException('Enter a valid organization name and representative designation.');
+                }
+                $partner = $this->db->prepare(
+                    'UPDATE partners SET organization_name = ?, official_designation = ? WHERE user_id = ?'
+                );
+                $partner->execute([$organization, $designation ?: null, (int) $user['id']]);
+            }
+            $currentPassword = (string) ($data['currentPassword'] ?? '');
+            $newPassword = (string) ($data['newPassword'] ?? '');
+            $confirmation = (string) ($data['confirmation'] ?? '');
+            if ($newPassword !== '' || $currentPassword !== '' || $confirmation !== '') {
+                if (strlen($newPassword) < 12 || strlen($newPassword) > 200 ||
+                    !hash_equals($newPassword, $confirmation)) {
+                    throw new RuntimeException('Enter a matching new password of at least 12 characters.');
+                }
+                $password = $this->db->prepare('SELECT password_hash FROM users WHERE id = ?');
+                $password->execute([(int) $user['id']]);
+                $passwordHash = $password->fetchColumn();
+                if (!is_string($passwordHash) || !password_verify($currentPassword, $passwordHash)) {
+                    throw new RuntimeException('Current password is incorrect.', 401);
+                }
+                $passwordUpdate = $this->db->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
+                $passwordUpdate->execute([password_hash($newPassword, PASSWORD_DEFAULT), (int) $user['id']]);
+                $passwordChanged = true;
+            }
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+        $_SESSION['user']['firstName'] = $firstName;
+        $_SESSION['user']['lastName'] = $lastName;
+        $this->logActivity('profile.updated', 'user', (int) $user['id'], ['password_changed' => $passwordChanged]);
+        Http::json(['message' => 'Profile updated.']);
+    }
+
+    private function evaluationReports(): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $from = $this->requiredDate($_GET['from'] ?? date('Y-m-d', strtotime('-366 days')));
+        $to = $this->requiredDate($_GET['to'] ?? date('Y-m-d'));
+        if ($to < $from || (strtotime($to) - strtotime($from)) / 86400 > 366) {
+            throw new RuntimeException('Choose a valid date range of no more than 367 days.');
+        }
+        $where = ['ve.created_at >= ?', 've.created_at < DATE_ADD(?, INTERVAL 1 DAY)'];
+        $params = [$from, $to];
+        if ($user['role'] === 'partner') {
+            $where[] = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+            ))';
+            array_push($params, (int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']);
+        }
+        $whereSql = implode(' AND ', $where);
+        $rowsQuery =
+            "SELECT ve.id, e.title AS event_title, p.title AS project_title,
+                    CONCAT(u.first_name, ' ', u.last_name) AS volunteer,
+                    ve.rating, ve.feedback, ve.created_at
+             FROM volunteer_event_evaluations ve
+             JOIN events e ON e.id = ve.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN users u ON u.id = ve.volunteer_user_id
+             WHERE $whereSql
+             ORDER BY ve.created_at DESC, ve.id DESC LIMIT 1000";
+        $rowsStatement = $this->db->prepare($rowsQuery);
+        $rowsStatement->execute($params);
+        $rows = $rowsStatement->fetchAll();
+        $summaryStatement = $this->db->prepare(
+            "SELECT COUNT(*) AS responses, COALESCE(AVG(ve.rating), 0) AS average_rating,
+                    SUM(ve.rating >= 4) AS positive_responses, COUNT(DISTINCT ve.event_id) AS events_evaluated
+             FROM volunteer_event_evaluations ve
+             JOIN events e ON e.id = ve.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE $whereSql"
+        );
+        $summaryStatement->execute($params);
+        $summary = $summaryStatement->fetch() ?: [];
+        $distribution = $this->db->prepare(
+            "SELECT ve.rating, COUNT(*) AS responses
+             FROM volunteer_event_evaluations ve
+             JOIN events e ON e.id = ve.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE $whereSql GROUP BY ve.rating ORDER BY ve.rating"
+        );
+        $distribution->execute($params);
+        Http::json([
+            'from' => $from,
+            'to' => $to,
+            'summary' => [
+                'responses' => (int) ($summary['responses'] ?? 0),
+                'average_rating' => round((float) ($summary['average_rating'] ?? 0), 2),
+                'positive_responses' => (int) ($summary['positive_responses'] ?? 0),
+                'events_evaluated' => (int) ($summary['events_evaluated'] ?? 0),
+            ],
+            'distribution' => $distribution->fetchAll(),
+            'evaluations' => $rows,
+        ]);
+    }
+
+    private function eventHistory(): never
+    {
+        $user = Http::requireRole('admin', 'partner', 'volunteer');
+        $today = date('Y-m-d');
+        $eventWhere = [
+            '(SELECT MAX(history_date.event_date) FROM event_dates history_date WHERE history_date.event_id = e.id) <= ?',
+        ];
+        $eventParams = [$today];
+        if ($user['role'] === 'partner') {
+            $eventWhere[] = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+            ))';
+            array_push($eventParams, (int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']);
+        } elseif ($user['role'] === 'volunteer') {
+            $eventWhere[] = "EXISTS (
+                SELECT 1 FROM event_applications ea
+                WHERE ea.event_id = e.id AND ea.volunteer_user_id = ? AND ea.status = 'approved'
+            )";
+            $eventParams[] = (int) $user['id'];
+        }
+        $eventsStatement = $this->db->prepare(
+            "SELECT e.id, e.title, p.title AS project_title, p.status AS proposal_status,
+                    MIN(ed.event_date) AS date_start, MAX(ed.event_date) AS date_end,
+                    (SELECT COUNT(DISTINCT CASE WHEN at.status = 'present' THEN at.application_id END)
+                     FROM attendance at JOIN event_dates attendance_date ON attendance_date.id = at.event_date_id
+                     WHERE attendance_date.event_id = e.id) AS attendance_count
+             FROM events e JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE p.status IN ('approved', 'active') AND " . implode(' AND ', $eventWhere) . "
+             GROUP BY e.id, e.title, p.title, p.status
+             ORDER BY date_end DESC, e.title LIMIT 500"
+        );
+        $eventsStatement->execute($eventParams);
+        if ($user['role'] === 'volunteer') {
+            $documentsStatement = $this->db->prepare(
+                'SELECT id, documentation_type AS document_type, original_name, description,
+                        created_at, mime_type, file_size, \'My Documentation\' AS project_title
+                 FROM volunteer_documentations WHERE volunteer_user_id = ?
+                 ORDER BY created_at DESC, id DESC LIMIT 500'
+            );
+            $documentsStatement->execute([(int) $user['id']]);
+            $certificatesStatement = $this->db->prepare(
+                'SELECT c.id, e.title AS event_title, p.title AS project_title, c.issued_at
+                 FROM certificates c JOIN events e ON e.id = c.event_id
+                 JOIN proposals p ON p.id = e.proposal_id
+                 WHERE c.volunteer_user_id = ? ORDER BY c.issued_at DESC LIMIT 500'
+            );
+            $certificatesStatement->execute([(int) $user['id']]);
+        } else {
+            $proposalWhere = '';
+            $documentParams = [];
+            if ($user['role'] === 'partner') {
+                $proposalWhere = ' WHERE p.owner_user_id = ? OR EXISTS (
+                    SELECT 1 FROM proposal_partners pp
+                    WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+                )';
+                $documentParams = [(int) $user['id'], (int) $user['id']];
+            }
+            $documentsStatement = $this->db->prepare(
+                "SELECT d.id, d.document_type, d.original_name, d.description, d.created_at,
+                        d.mime_type, d.file_size, p.title AS project_title
+                 FROM documents d JOIN proposals p ON p.id = d.proposal_id" . $proposalWhere . "
+                 ORDER BY d.created_at DESC, d.id DESC LIMIT 500"
+            );
+            $documentsStatement->execute($documentParams);
+            $certificateWhere = '';
+            $certificateParams = [];
+            if ($user['role'] === 'partner') {
+                $certificateWhere = ' WHERE e.organizer_user_id = ? OR EXISTS (
+                    SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+                )';
+                $certificateParams = [(int) $user['id'], (int) $user['id']];
+            }
+            $certificatesStatement = $this->db->prepare(
+                "SELECT c.id, e.title AS event_title, p.title AS project_title, c.issued_at
+                 FROM certificates c JOIN events e ON e.id = c.event_id
+                 JOIN proposals p ON p.id = e.proposal_id" . $certificateWhere . "
+                 ORDER BY c.issued_at DESC LIMIT 500"
+            );
+            $certificatesStatement->execute($certificateParams);
+        }
+        Http::json([
+            'events' => $eventsStatement->fetchAll(),
+            'documents' => $documentsStatement->fetchAll(),
+            'certificates' => $certificatesStatement->fetchAll(),
+        ]);
+    }
+
+    private function activityLogs(): never
+    {
+        Http::requireRole('admin');
+        $from = isset($_GET['from']) && $_GET['from'] !== '' ? $this->requiredDate($_GET['from']) : null;
+        $to = isset($_GET['to']) && $_GET['to'] !== '' ? $this->requiredDate($_GET['to']) : null;
+        if ($from && $to && $to < $from) {
+            throw new RuntimeException('The end date cannot precede the start date.');
+        }
+        $where = [];
+        $params = [];
+        if ($from) {
+            $where[] = 'al.created_at >= ?';
+            $params[] = $from;
+        }
+        if ($to) {
+            $where[] = 'al.created_at < DATE_ADD(?, INTERVAL 1 DAY)';
+            $params[] = $to;
+        }
+        if (!empty($_GET['search'])) {
+            $search = '%' . str_replace(['%', '_'], ['\\%', '\\_'], trim((string) $_GET['search'])) . '%';
+            $where[] = '(al.action LIKE ? OR al.entity_type LIKE ? OR al.details LIKE ? OR CONCAT(u.first_name, \' \', u.last_name) LIKE ?)';
+            array_push($params, $search, $search, $search, $search);
+        }
+        $statement = $this->db->prepare(
+            'SELECT al.id, al.actor_user_id, al.actor_role, al.action, al.entity_type,
+                    al.entity_id, al.details, al.ip_address, al.created_at,
+                    CONCAT(u.first_name, \' \', u.last_name) AS actor_name, u.email AS actor_email
+             FROM activity_logs al LEFT JOIN users u ON u.id = al.actor_user_id' .
+            ($where ? ' WHERE ' . implode(' AND ', $where) : '') .
+            ' ORDER BY al.created_at DESC, al.id DESC LIMIT 500'
+        );
+        $statement->execute($params);
+        Http::json(['logs' => $statement->fetchAll()]);
     }
 
     private function overview(): never
@@ -882,7 +1184,12 @@ final class ApiController
             }
             throw $exception;
         }
-        Http::json(['id' => (int) $this->db->lastInsertId(), 'message' => 'Evaluation submitted.'], 201);
+        $evaluationId = (int) $this->db->lastInsertId();
+        $this->logActivity('volunteer.evaluation_submitted', 'evaluation', $evaluationId, [
+            'event_id' => $eventId,
+            'rating' => $rating,
+        ]);
+        Http::json(['id' => $evaluationId, 'message' => 'Evaluation submitted.'], 201);
     }
 
     private function volunteerDocumentations(): never
@@ -931,7 +1238,9 @@ final class ApiController
             $this->removeStoredUpload($path);
             throw $exception;
         }
-        Http::json(['id' => (int) $this->db->lastInsertId(), 'message' => 'Documentation uploaded.'], 201);
+        $documentationId = (int) $this->db->lastInsertId();
+        $this->logActivity('volunteer.documentation_uploaded', 'documentation', $documentationId, ['type' => $type]);
+        Http::json(['id' => $documentationId, 'message' => 'Documentation uploaded.'], 201);
     }
 
     private function downloadVolunteerDocumentation(int $documentationId): never
@@ -980,6 +1289,7 @@ final class ApiController
             throw new RuntimeException('Documentation could not be deleted.', 409);
         }
         $this->removeStoredUpload($path);
+        $this->logActivity('volunteer.documentation_deleted', 'documentation', $documentationId);
         Http::json(['message' => 'Documentation deleted.']);
     }
 
@@ -1080,6 +1390,7 @@ final class ApiController
             }
             $this->notifyUser($id, 'Account ' . $status, $message);
         }
+        $this->logActivity('account.status_changed', 'user', $id, ['from' => $previousStatus, 'to' => $status]);
         Http::json(['message' => 'Account ' . $status . '.']);
     }
 
@@ -1179,6 +1490,7 @@ final class ApiController
             $this->db->rollBack();
             throw $exception;
         }
+        $this->logActivity('proposal.created', 'proposal', $proposalId);
         Http::json(['id' => $proposalId, 'status' => 'draft'], 201);
     }
 
@@ -1530,6 +1842,7 @@ final class ApiController
             throw new RuntimeException('Only draft or revision proposals can be submitted.');
         }
         $this->notifyAdmins('Proposal submitted', 'A proposal is ready for CES Admin review.');
+        $this->logActivity('proposal.submitted', 'proposal', $proposalId);
         Http::json(['status' => 'submitted']);
     }
 
@@ -1576,6 +1889,7 @@ final class ApiController
         $update = $this->db->prepare('UPDATE proposals SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW() WHERE id = ?');
         $update->execute([$status, $notes ?: null, $admin['id'], $proposalId]);
         $this->notifyUser((int) $current['owner_user_id'], 'Proposal ' . str_replace('_', ' ', $status), $notes ?: 'Your proposal status is now ' . str_replace('_', ' ', $status) . '.');
+        $this->logActivity('proposal.status_changed', 'proposal', $proposalId, ['from' => $current['status'], 'to' => $status]);
         Http::json(['status' => $status]);
     }
 
@@ -1950,6 +2264,7 @@ final class ApiController
             $this->db->rollBack();
             throw $exception;
         }
+        $this->logActivity('event.created', 'event', $eventId, ['proposal_id' => $proposalId]);
         Http::json(['id' => $eventId, 'message' => 'Event created. QR credentials can be viewed by the organizer.'], 201);
     }
 
@@ -2166,6 +2481,7 @@ final class ApiController
              WHERE id = ?'
         );
         $statement->execute([$title, $description ?: null, $capacity, $openAt, $closeAt, $eventId]);
+        $this->logActivity('event.details_updated', 'event', $eventId);
         Http::json(['message' => 'Event details updated.']);
     }
 
@@ -2778,6 +3094,10 @@ final class ApiController
             ? 'A volunteer has automatically joined your event.'
             : 'A volunteer has applied to your event.';
         $this->notifyEventOrganizers($eventId, 'New volunteer registration', $message);
+        $this->logActivity('volunteer.event_applied', 'event_application', $applicationId, [
+            'event_id' => $eventId,
+            'status' => $status,
+        ]);
         Http::json([
             'id' => $applicationId,
             'status' => $status,
@@ -2883,6 +3203,10 @@ final class ApiController
             throw $exception;
         }
         $this->notifyUser((int) $application['volunteer_user_id'], 'Event application ' . $status, 'Your volunteer application was ' . $status . '.');
+        $this->logActivity('volunteer.application_reviewed', 'event_application', $applicationId, [
+            'event_id' => (int) $application['event_id'],
+            'status' => $status,
+        ]);
         Http::json(['status' => $status]);
     }
 
@@ -3118,6 +3442,7 @@ final class ApiController
              ON DUPLICATE KEY UPDATE status = 'present', scanned_at = NOW(), marked_by = NULL, note = NULL"
         );
         $insert->execute([(int) $applicationId, $eventDateId]);
+        $this->logActivity('attendance.checked_in', 'event_date', $eventDateId, ['event_id' => (int) $date['event_id']]);
         Http::json(['message' => 'Attendance recorded.', 'status' => 'present', 'eventDateId' => $eventDateId]);
     }
 
@@ -3145,6 +3470,11 @@ final class ApiController
              ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by), note = VALUES(note)'
         );
         $upsert->execute([$applicationId, $eventDateId, $status, $user['id'], trim((string) ($data['note'] ?? '')) ?: null]);
+        $this->logActivity('attendance.status_overridden', 'event_date', $eventDateId, [
+            'event_id' => (int) $eventId,
+            'application_id' => $applicationId,
+            'status' => $status,
+        ]);
         Http::json(['status' => $status]);
     }
 
@@ -3174,7 +3504,12 @@ final class ApiController
         }
         $statement = $this->db->prepare('INSERT INTO participant_counts (event_date_id, participant_group, participant_count, recorded_by) VALUES (?, ?, ?, ?)');
         $statement->execute([$eventDateId, $group, $count, $user['id']]);
-        Http::json(['id' => (int) $this->db->lastInsertId()], 201);
+        $participantCountId = (int) $this->db->lastInsertId();
+        $this->logActivity('event.participants_recorded', 'participant_count', $participantCountId, [
+            'event_date_id' => $eventDateId,
+            'count' => $count,
+        ]);
+        Http::json(['id' => $participantCountId], 201);
     }
 
     private function eventIdForDate(int $eventDateId): int
@@ -3206,17 +3541,8 @@ final class ApiController
         $where = ['p.created_at >= ?', 'p.created_at < DATE_ADD(?, INTERVAL 1 DAY)'];
         $params = [$from, $to];
         if ($user['role'] === 'partner') {
-            $where[] = '(p.owner_user_id = ? OR EXISTS (
-                SELECT 1 FROM proposal_partners pp
-                WHERE pp.proposal_id = p.id
-                  AND pp.partner_user_id = ?
-                  AND pp.invitation_status = ?
-            ))';
-            array_push($params, (int) $user['id'], (int) $user['id'], 'accepted');
-        }
-        if ($user['role'] !== 'admin') {
             $where[] = '(p.owner_user_id = ? OR EXISTS (SELECT 1 FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = ?))';
-            array_push($params, $user['id'], $user['id'], 'accepted');
+            array_push($params, (int) $user['id'], (int) $user['id'], 'accepted');
         }
         if (!empty($_GET['status'])) {
             $status = trim((string) $_GET['status']);
@@ -3242,7 +3568,9 @@ final class ApiController
         }
         if (isset($_GET['format']) && $_GET['format'] === 'csv') {
             $statement = $this->db->prepare(
-                'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.created_at FROM proposals p WHERE ' . implode(' AND ', $where) . ' ORDER BY p.created_at DESC LIMIT 5000'
+                'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.total_estimated_cost, p.created_at,
+                        (SELECT COUNT(*) FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.invitation_status = \'accepted\') AS partner_count
+                 FROM proposals p WHERE ' . implode(' AND ', $where) . ' ORDER BY p.created_at DESC LIMIT 5000'
             );
             $statement->execute($params);
             header('Content-Type: text/csv; charset=utf-8');
@@ -3251,7 +3579,7 @@ final class ApiController
             if ($output === false) {
                 throw new RuntimeException('Unable to create report export.', 500);
             }
-            fputcsv($output, ['ID', 'Project', 'Status', 'Start date', 'End date', 'Created']);
+            fputcsv($output, ['ID', 'Project', 'Status', 'Start date', 'End date', 'Estimated budget', 'Partner organizations', 'Created']);
             while ($row = $statement->fetch(PDO::FETCH_NUM)) {
                 fputcsv($output, array_map([$this, 'safeCsvCell'], $row));
             }
@@ -3260,8 +3588,9 @@ final class ApiController
         }
         if (isset($_GET['format']) && $_GET['format'] === 'pdf') {
             $statement = $this->db->prepare(
-                'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.created_at,
-                        (SELECT COUNT(*) FROM events e WHERE e.proposal_id = p.id) AS event_count
+                'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.total_estimated_cost, p.created_at,
+                        (SELECT COUNT(*) FROM events e WHERE e.proposal_id = p.id) AS event_count,
+                        (SELECT COUNT(*) FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.invitation_status = \'accepted\') AS partner_count
                  FROM proposals p WHERE ' . implode(' AND ', $where) . ' ORDER BY p.created_at DESC LIMIT 1000'
             );
             $statement->execute($params);
@@ -3275,12 +3604,13 @@ final class ApiController
                 th{background:#eaf3ee;color:#123d36}
                 </style></head><body><h1>UCC-CES Project Report</h1><p>Date range ' .
                 $escape($from) . ' to ' . $escape($to) .
-                '</p><table><thead><tr><th>ID</th><th>Project</th><th>Status</th><th>Period</th><th>Events</th><th>Created</th></tr></thead><tbody>';
+                '</p><table><thead><tr><th>ID</th><th>Project</th><th>Status</th><th>Period</th><th>Budget</th><th>Partners</th><th>Events</th><th>Created</th></tr></thead><tbody>';
             foreach ($rows as $row) {
                 $html .= '<tr><td>' . (int) $row['id'] . '</td><td>' . $escape($row['title']) . '</td><td>' .
                     $escape(str_replace('_', ' ', $row['status'])) . '</td><td>' .
                     $escape(($row['period_start'] ?: 'Unscheduled') . ' - ' . ($row['period_end'] ?: 'Unscheduled')) . '</td><td>' .
-                    (int) $row['event_count'] . '</td><td>' . $escape($row['created_at']) . '</td></tr>';
+                    number_format((float) $row['total_estimated_cost'], 2) . '</td><td>' .
+                    (int) $row['partner_count'] . '</td><td>' . (int) $row['event_count'] . '</td><td>' . $escape($row['created_at']) . '</td></tr>';
             }
             $html .= '</tbody></table></body></html>';
             $pdf = new \Dompdf\Dompdf(new \Dompdf\Options(['isRemoteEnabled' => false]));
@@ -3291,12 +3621,58 @@ final class ApiController
             exit;
         }
         $statement = $this->db->prepare(
-            'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.created_at,
-                    (SELECT COUNT(*) FROM events e WHERE e.proposal_id = p.id) AS event_count
-             FROM proposals p WHERE ' . implode(' AND ', $where) . ' ORDER BY p.created_at DESC LIMIT 500'
+            'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.total_estimated_cost, p.created_at,
+                    CONCAT(u.first_name, \' \', u.last_name) AS proposer,
+                    (SELECT COUNT(*) FROM events e WHERE e.proposal_id = p.id) AS event_count,
+                    (SELECT COUNT(*) FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.invitation_status = \'accepted\') AS partner_count
+             FROM proposals p JOIN users u ON u.id = p.owner_user_id
+             WHERE ' . implode(' AND ', $where) . ' ORDER BY p.created_at DESC LIMIT 2000'
         );
         $statement->execute($params);
-        Http::json(['from' => $from, 'to' => $to, 'projects' => $statement->fetchAll()]);
+        $projects = $statement->fetchAll();
+        $summaryStatement = $this->db->prepare(
+            "SELECT COUNT(*) AS projects, COALESCE(SUM(p.total_estimated_cost), 0) AS estimated_budget,
+                    COALESCE(SUM(p.status IN ('approved', 'active')), 0) AS active_completed
+             FROM proposals p WHERE " . implode(' AND ', $where)
+        );
+        $summaryStatement->execute($params);
+        $projectSummary = $summaryStatement->fetch() ?: [];
+        $statusStatement = $this->db->prepare(
+            'SELECT p.status, COUNT(*) AS total FROM proposals p WHERE ' .
+            implode(' AND ', $where) . ' GROUP BY p.status'
+        );
+        $statusStatement->execute($params);
+        $statusCounts = [];
+        foreach ($statusStatement->fetchAll() as $statusRow) {
+            $statusCounts[$statusRow['status']] = (int) $statusRow['total'];
+        }
+        $partnerCountStatement = $this->db->prepare(
+            "SELECT COUNT(DISTINCT pp.partner_user_id)
+             FROM proposals p JOIN proposal_partners pp
+               ON pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
+             WHERE " . implode(' AND ', $where)
+        );
+        $partnerCountStatement->execute($params);
+        $headcountStatement = $this->db->prepare(
+            "SELECT COUNT(*)
+             FROM proposals p JOIN events e ON e.proposal_id = p.id
+             JOIN event_applications ea ON ea.event_id = e.id AND ea.status = 'approved'
+             WHERE " . implode(' AND ', $where)
+        );
+        $headcountStatement->execute($params);
+        Http::json([
+            'from' => $from,
+            'to' => $to,
+            'summary' => [
+                'projects' => (int) ($projectSummary['projects'] ?? 0),
+                'estimated_budget' => round((float) ($projectSummary['estimated_budget'] ?? 0), 2),
+                'active_completed' => (int) ($projectSummary['active_completed'] ?? 0),
+                'engaged_partners' => (int) $partnerCountStatement->fetchColumn(),
+                'headcount' => (int) $headcountStatement->fetchColumn(),
+                'statuses' => $statusCounts,
+            ],
+            'projects' => $projects,
+        ]);
     }
 
     private function moduleReport(array $user, string $module, string $from, string $to): never
@@ -3311,8 +3687,16 @@ final class ApiController
             }
             $baseQuery =
                 'SELECT p.user_id AS id, p.organization_name AS subject, p.organization_type AS context,
-                        u.account_status AS status, u.created_at AS report_date, COALESCE(p.address, \'\') AS details,
-                        p.user_id AS partner_id, p.organization_type AS category
+                        u.account_status AS status, u.created_at AS report_date,
+                        CONCAT(COALESCE(p.address, \'\'), \' · Proposals: \',
+                            (SELECT COUNT(*) FROM proposal_partners pp WHERE pp.partner_user_id = p.user_id AND pp.invitation_status = \'accepted\'),
+                            \' · Active engagements: \',
+                            (SELECT COUNT(DISTINCT e.id) FROM proposal_partners pp
+                             JOIN events e ON e.proposal_id = pp.proposal_id
+                             JOIN proposals engaged ON engaged.id = pp.proposal_id AND engaged.status IN (\'approved\', \'active\')
+                             WHERE pp.partner_user_id = p.user_id AND pp.invitation_status = \'accepted\')) AS details,
+                        p.user_id AS partner_id, p.organization_type AS category,
+                        NULL AS metric_value, NULL AS rating_value, NULL AS volunteer_id
                  FROM partners p JOIN users u ON u.id = p.user_id' . $projectScope;
         } else {
             $scope = '';
@@ -3334,10 +3718,23 @@ final class ApiController
                          WHERE pc.proposal_id = p.id)";
             $queries = [
                 'events' =>
-                    "SELECT e.id, e.title AS subject, p.title AS context, p.status,
+                    "SELECT e.id, e.title AS subject, p.title AS context,
+                            CASE
+                                WHEN EXISTS (SELECT 1 FROM event_dates today_date WHERE today_date.event_id = e.id AND today_date.event_date = CURRENT_DATE) THEN 'ongoing'
+                                WHEN EXISTS (SELECT 1 FROM event_dates future_date WHERE future_date.event_id = e.id AND future_date.event_date > CURRENT_DATE) THEN 'upcoming'
+                                ELSE 'completed'
+                            END AS status,
                             COALESCE(MIN(ed.event_date), DATE(e.created_at)) AS report_date,
-                            CONCAT('Capacity: ', e.capacity) AS details, e.organizer_user_id AS partner_id,
-                            $category AS category
+                            CONCAT('Capacity: ', e.capacity, ' · Registered: ',
+                                (SELECT COUNT(*) FROM event_applications ea WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')),
+                                ' · Present: ', (SELECT COUNT(*) FROM attendance at
+                                    JOIN event_dates attendance_date ON attendance_date.id = at.event_date_id
+                                    WHERE attendance_date.event_id = e.id AND at.status = 'present')) AS details,
+                            e.organizer_user_id AS partner_id,
+                            $category AS category,
+                            (SELECT COUNT(*) FROM event_applications headcount_apps
+                             WHERE headcount_apps.event_id = e.id AND headcount_apps.status = 'approved') AS metric_value,
+                            NULL AS rating_value, NULL AS volunteer_id
                      FROM events e JOIN proposals p ON p.id = e.proposal_id
                      LEFT JOIN event_dates ed ON ed.event_id = e.id" .
                     $eventScope .
@@ -3345,7 +3742,8 @@ final class ApiController
                 'applications' =>
                     "SELECT ea.id, e.title AS subject, p.title AS context, ea.status, ea.applied_at AS report_date,
                             CONCAT(u.first_name, ' ', u.last_name, ' · ', u.email) AS details,
-                            e.organizer_user_id AS partner_id, $category AS category
+                            e.organizer_user_id AS partner_id, $category AS category,
+                            1 AS metric_value, NULL AS rating_value, ea.volunteer_user_id AS volunteer_id
                      FROM event_applications ea
                      JOIN events e ON e.id = ea.event_id
                      JOIN proposals p ON p.id = e.proposal_id
@@ -3354,7 +3752,9 @@ final class ApiController
                     "SELECT a.id, e.title AS subject, p.title AS context, a.status,
                             COALESCE(a.scanned_at, CONCAT(ed.event_date, ' 00:00:00')) AS report_date,
                             CONCAT(u.first_name, ' ', u.last_name, IF(a.note IS NULL, '', CONCAT(' · ', a.note))) AS details,
-                            e.organizer_user_id AS partner_id, $category AS category
+                            e.organizer_user_id AS partner_id, $category AS category,
+                            IF(a.status = 'present', 1, 0) AS metric_value,
+                            NULL AS rating_value, ea.volunteer_user_id AS volunteer_id
                      FROM attendance a
                      JOIN event_applications ea ON ea.id = a.application_id
                      JOIN users u ON u.id = ea.volunteer_user_id
@@ -3365,20 +3765,28 @@ final class ApiController
                     "SELECT pc.id, e.title AS subject, p.title AS context, 'recorded' AS status,
                             pc.created_at AS report_date,
                             CONCAT(pc.participant_group, ': ', pc.participant_count) AS details,
-                            e.organizer_user_id AS partner_id, $category AS category
+                            e.organizer_user_id AS partner_id, $category AS category,
+                            pc.participant_count AS metric_value, NULL AS rating_value, NULL AS volunteer_id
                      FROM participant_counts pc
                      JOIN event_dates ed ON ed.id = pc.event_date_id
                      JOIN events e ON e.id = ed.event_id
                      JOIN proposals p ON p.id = e.proposal_id" . $eventScope,
                 'evaluations' =>
-                    "SELECT ev.id, p.title AS subject, 'Project evaluation' AS context, 'completed' AS status,
-                            ev.created_at AS report_date, CONCAT('Rating ', ev.rating, '/5: ', LEFT(COALESCE(ev.feedback, ''), 600)) AS details,
-                            p.owner_user_id AS partner_id, $category AS category
-                     FROM evaluations ev JOIN proposals p ON p.id = ev.proposal_id" . $scope,
+                    "SELECT ve.id, e.title AS subject, p.title AS context, 'completed' AS status,
+                            ve.created_at AS report_date,
+                            CONCAT('Rating ', ve.rating, '/5 · ', u.first_name, ' ', u.last_name, ': ',
+                                   LEFT(COALESCE(ve.feedback, ''), 600)) AS details,
+                            e.organizer_user_id AS partner_id, $category AS category,
+                            1 AS metric_value, ve.rating AS rating_value, ve.volunteer_user_id AS volunteer_id
+                     FROM volunteer_event_evaluations ve
+                     JOIN events e ON e.id = ve.event_id
+                     JOIN proposals p ON p.id = e.proposal_id
+                     JOIN users u ON u.id = ve.volunteer_user_id" . $eventScope,
                 'certificates' =>
                     "SELECT c.id, e.title AS subject, p.title AS context, 'issued' AS status,
                             c.issued_at AS report_date, CONCAT(u.first_name, ' ', u.last_name) AS details,
-                            e.organizer_user_id AS partner_id, $category AS category
+                            e.organizer_user_id AS partner_id, $category AS category,
+                            1 AS metric_value, NULL AS rating_value, c.volunteer_user_id AS volunteer_id
                      FROM certificates c
                      JOIN events e ON e.id = c.event_id
                      JOIN proposals p ON p.id = e.proposal_id
@@ -3387,10 +3795,33 @@ final class ApiController
                     "SELECT d.id, p.title AS subject, d.document_type AS context,
                             IF(d.is_signed = 1, 'signed', 'unsigned') AS status, d.created_at AS report_date,
                             d.original_name AS details, p.owner_user_id AS partner_id, $category AS category
+                            , NULL AS metric_value, NULL AS rating_value, NULL AS volunteer_id
                      FROM documents d JOIN proposals p ON p.id = d.proposal_id" . $scope,
+                'volunteer_engagement' =>
+                    "SELECT ea.id, CONCAT(u.first_name, ' ', u.last_name) AS subject,
+                            e.title AS context, 'attended' AS status,
+                            COALESCE(MAX(at.scanned_at), CONCAT(MAX(ed.event_date), ' 00:00:00')) AS report_date,
+                            CONCAT(COALESCE(vp.registration_classification, vp.volunteer_type), ' · ',
+                                ROUND(SUM(TIME_TO_SEC(TIMEDIFF(a.end_time, a.start_time)) / 3600), 2), ' hours') AS details,
+                            e.organizer_user_id AS partner_id,
+                            COALESCE(vp.registration_classification, vp.volunteer_type) AS category,
+                            ROUND(SUM(TIME_TO_SEC(TIMEDIFF(a.end_time, a.start_time)) / 3600), 2) AS metric_value,
+                            NULL AS rating_value, u.id AS volunteer_id
+                     FROM event_applications ea
+                     JOIN users u ON u.id = ea.volunteer_user_id
+                     JOIN volunteer_profiles vp ON vp.user_id = u.id
+                     JOIN events e ON e.id = ea.event_id
+                     JOIN proposals p ON p.id = e.proposal_id
+                     JOIN attendance at ON at.application_id = ea.id AND at.status = 'present'
+                     JOIN event_dates ed ON ed.id = at.event_date_id
+                     JOIN activities a ON a.event_date_id = ed.id
+                     $eventScope
+                     GROUP BY ea.id, u.first_name, u.last_name, e.title, e.organizer_user_id,
+                              vp.registration_classification, vp.volunteer_type",
             ];
             if ($user['role'] !== 'admin' && in_array($module, [
-                'events', 'applications', 'attendance', 'participants', 'certificates',
+                'events', 'applications', 'attendance', 'participants', 'evaluations',
+                'volunteer_engagement', 'certificates',
             ], true)) {
                 $baseParams = [(int) $user['id'], (int) $user['id']];
             }
@@ -3402,11 +3833,12 @@ final class ApiController
 
         $statuses = [
             'partners' => ['pending', 'approved', 'rejected', 'disabled'],
-            'events' => ['draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected'],
+            'events' => ['upcoming', 'ongoing', 'completed'],
             'applications' => ['pending', 'approved', 'rejected', 'withdrawn'],
             'attendance' => ['present', 'absent', 'excused'],
             'participants' => ['recorded'],
             'evaluations' => ['completed'],
+            'volunteer_engagement' => ['attended'],
             'certificates' => ['issued'],
             'documents' => ['signed', 'unsigned'],
         ];
@@ -3436,11 +3868,58 @@ final class ApiController
             $where[] = '(CAST(id AS CHAR) LIKE ? OR subject LIKE ? OR context LIKE ? OR details LIKE ?)';
             array_push($params, $search, $search, $search, $search);
         }
-        $sql = 'SELECT id, subject, context, status, report_date, details FROM (' . $baseQuery . ') report WHERE ' .
+        $sql = 'SELECT id, subject, context, status, report_date, details, metric_value, rating_value, category, volunteer_id FROM (' . $baseQuery . ') report WHERE ' .
             implode(' AND ', $where) . ' ORDER BY report_date DESC LIMIT 2000';
         $statement = $this->db->prepare($sql);
         $statement->execute($params);
         $rows = $statement->fetchAll();
+        $filteredQuery = 'SELECT id, subject, context, status, report_date, details, metric_value, rating_value, category, volunteer_id FROM (' . $baseQuery . ') report WHERE ' .
+            implode(' AND ', $where);
+        $summaryStatement = $this->db->prepare(
+            'SELECT COUNT(*) AS records, SUM(metric_value) AS metric_total, AVG(rating_value) AS average_rating,
+                    COUNT(DISTINCT volunteer_id) AS active_volunteers,
+                    COUNT(DISTINCT partner_id) AS engaged_partners,
+                    SUM(status IN (\'approved\', \'active\', \'ongoing\', \'completed\', \'issued\', \'present\', \'attended\')) AS active_completed
+             FROM (' . $filteredQuery . ') filtered_report'
+        );
+        $summaryStatement->execute($params);
+        $summaryRow = $summaryStatement->fetch() ?: [];
+        $statusStatement = $this->db->prepare(
+            'SELECT status, COUNT(*) AS total FROM (' . $filteredQuery . ') filtered_report GROUP BY status'
+        );
+        $statusStatement->execute($params);
+        $statusCounts = [];
+        foreach ($statusStatement->fetchAll() as $statusRow) {
+            $statusCounts[$statusRow['status']] = (int) $statusRow['total'];
+        }
+        $categoryCounts = [];
+        if ($module === 'volunteer_engagement') {
+            $categoryStatement = $this->db->prepare(
+                'SELECT category, COUNT(*) AS total FROM (' . $filteredQuery . ') filtered_report
+                 WHERE category IS NOT NULL GROUP BY category ORDER BY total DESC, category'
+            );
+            $categoryStatement->execute($params);
+            $categoryCounts = $categoryStatement->fetchAll();
+        }
+        $summary = [
+            'records' => (int) ($summaryRow['records'] ?? 0),
+            'statuses' => $statusCounts,
+            'rendered_hours' => $module === 'volunteer_engagement'
+                ? round((float) ($summaryRow['metric_total'] ?? 0), 2)
+                : null,
+            'average_rating' => $module === 'evaluations' && $summaryRow['average_rating'] !== null
+                ? round((float) $summaryRow['average_rating'], 2)
+                : null,
+            'active_volunteers' => $module === 'volunteer_engagement'
+                ? (int) ($summaryRow['active_volunteers'] ?? 0)
+                : null,
+            'active_completed' => (int) ($summaryRow['active_completed'] ?? 0),
+            'engaged_partners' => (int) ($summaryRow['engaged_partners'] ?? 0),
+            'headcount' => $module === 'volunteer_engagement'
+                ? (int) ($summaryRow['active_volunteers'] ?? 0)
+                : (int) ($summaryRow['metric_total'] ?? 0),
+            'classifications' => $categoryCounts,
+        ];
 
         $format = (string) ($_GET['format'] ?? '');
         if ($format === 'csv') {
@@ -3450,10 +3929,11 @@ final class ApiController
             if ($output === false) {
                 throw new RuntimeException('Unable to create report export.', 500);
             }
-            fputcsv($output, ['Record ID', 'Record', 'Related project / context', 'Status', 'Date', 'Details']);
+            fputcsv($output, ['Record ID', 'Record', 'Related project / context', 'Status', 'Date', 'Details', 'Classification / category', 'Hours / count', 'Rating']);
             foreach ($rows as $row) {
                 fputcsv($output, array_map([$this, 'safeCsvCell'], [
                     $row['id'], $row['subject'], $row['context'], $row['status'], $row['report_date'], $row['details'],
+                    $row['category'], $row['metric_value'], $row['rating_value'],
                 ]));
             }
             fclose($output);
@@ -3469,12 +3949,15 @@ final class ApiController
                 th{background:#eaf3ee;color:#123d36}
                 </style></head><body><h1>UCC-CES ' . $escape(ucfirst($module)) . ' Report</h1><p>Date range ' .
                 $escape($from) . ' to ' . $escape($to) . ' · Non-financial data</p><table><thead><tr>' .
-                '<th>Record</th><th>Related context</th><th>Status</th><th>Date</th><th>Details</th></tr></thead><tbody>';
+                '<th>Record</th><th>Related context</th><th>Status</th><th>Date</th><th>Details</th><th>Classification / category</th><th>Hours / count</th><th>Rating</th></tr></thead><tbody>';
             foreach ($rows as $row) {
                 $html .= '<tr><td>' . $escape((string) $row['subject']) . '</td><td>' .
                     $escape((string) $row['context']) . '</td><td>' . $escape((string) $row['status']) .
                     '</td><td>' . $escape((string) $row['report_date']) . '</td><td>' .
-                    $escape((string) $row['details']) . '</td></tr>';
+                    $escape((string) $row['details']) . '</td><td>' .
+                    $escape((string) ($row['category'] ?? '')) . '</td><td>' .
+                    $escape((string) ($row['metric_value'] ?? '')) . '</td><td>' .
+                    $escape((string) ($row['rating_value'] ?? '')) . '</td></tr>';
             }
             $html .= '</tbody></table></body></html>';
             $pdf = new \Dompdf\Dompdf(new \Dompdf\Options(['isRemoteEnabled' => false]));
@@ -3487,7 +3970,7 @@ final class ApiController
         if ($format !== '') {
             throw new RuntimeException('Choose CSV or PDF for report export.');
         }
-        Http::json(['from' => $from, 'to' => $to, 'module' => $module, 'rows' => $rows]);
+        Http::json(['from' => $from, 'to' => $to, 'module' => $module, 'summary' => $summary, 'rows' => $rows]);
     }
 
     private function projectDossier(int $proposalId): never
@@ -4049,6 +4532,29 @@ final class ApiController
                 $message
             );
         }
+    }
+
+    private function logActivity(string $action, string $entityType, ?int $entityId = null, array $details = []): void
+    {
+        $actor = $_SESSION['user'] ?? null;
+        $actorId = is_array($actor) && isset($actor['id']) ? (int) $actor['id'] : null;
+        $actorRole = is_array($actor) && isset($actor['role']) ? (string) $actor['role'] : 'system';
+        $ipAddress = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP)
+            ? (string) $_SERVER['REMOTE_ADDR']
+            : null;
+        $statement = $this->db->prepare(
+            'INSERT INTO activity_logs (actor_user_id, actor_role, action, entity_type, entity_id, details, ip_address)
+             VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        $statement->execute([
+            $actorId,
+            $actorRole,
+            mb_substr($action, 0, 100, 'UTF-8'),
+            mb_substr($entityType, 0, 60, 'UTF-8'),
+            $entityId,
+            $details ? json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR) : null,
+            $ipAddress,
+        ]);
     }
 
     private function notifyEventOrganizers(int $eventId, string $subject, string $message): void

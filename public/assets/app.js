@@ -16,7 +16,10 @@ const pageRoutes = {
     documentations: 'documentations',
     accounts: 'accounts',
     reports: 'reports',
-    notifications: 'notifications'
+    notifications: 'notifications',
+    'event-history': 'event-history',
+    'activity-logs': 'activity-logs',
+    profile: 'profile'
 };
 const routeScript = document.querySelector('script[src*="app.js"]');
 const scriptBasePath = routeScript
@@ -36,6 +39,11 @@ let qrTrigger = null;
 function pageUrl(page) {
     const suffix = pageRoutes[page];
     return suffix ? `${appBasePath}/${suffix}` : `${appBasePath}/`;
+}
+
+function localDateInputValue(value = new Date()) {
+    const local = new Date(value.getTime() - value.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 10);
 }
 
 function pageFromLocation() {
@@ -538,8 +546,9 @@ async function renderPage(page) {
         applications: ['volunteer'],
         'joined-events': ['volunteer'],
         certificates: ['volunteer'],
-        evaluations: ['volunteer'],
-        documentations: ['volunteer']
+        evaluations: ['admin', 'partner', 'volunteer'],
+        documentations: ['volunteer'],
+        'activity-logs': ['admin']
     };
     if (pageRoles[page] && !pageRoles[page].includes(currentUser.role)) {
         page = 'overview';
@@ -563,10 +572,15 @@ async function renderPage(page) {
         applications: ['My Applications', 'Track pending, approved, and declined event applications.'],
         'joined-events': ['Joined Events', 'Review approved registrations and check in using event QR codes.'],
         certificates: ['Certificates', 'View, download, and print certificates issued for your participation.'],
-        evaluations: ['Evaluation Reports', 'Share feedback and review your submitted post-event evaluations.'],
         documentations: ['My Documentations', 'Upload and manage your field photos, reports, and accomplishments.'],
-        reports: ['Project reports', 'Explore project activity with date-bounded, non-financial reporting.'],
-        notifications: ['Notifications', 'Your latest system updates.']
+        reports: ['System-wide Reports', 'Analyze proposals, projects, events, volunteers, partners, and feedback.'],
+        notifications: ['Notifications', 'Your latest system updates.'],
+        evaluations: currentUser.role === 'volunteer'
+            ? ['Evaluation Reports', 'Share feedback and review your submitted post-event evaluations.']
+            : ['Evaluation', 'Review volunteer feedback and analyze event satisfaction.'],
+        'event-history': ['Event History & Documentations', 'Browse completed programs and their project records.'],
+        'activity-logs': ['Activity Logs', 'Review the administrative audit trail of important system changes.'],
+        profile: ['My Profile', 'Manage your account details and security settings.']
     };
     pageHeading.hidden = page === 'accounts';
     const heading = pages[page] || pages.overview;
@@ -578,8 +592,14 @@ async function renderPage(page) {
         if (page === 'applications') await renderVolunteerApplications();
         if (page === 'joined-events') await renderVolunteerJoinedEvents();
         if (page === 'certificates') await renderVolunteerCertificates();
-        if (page === 'evaluations') await renderVolunteerEvaluations();
+        if (page === 'evaluations') {
+            if (currentUser.role === 'volunteer') await renderVolunteerEvaluations();
+            else await renderEvaluationReports();
+        }
         if (page === 'documentations') await renderVolunteerDocumentations();
+        if (page === 'event-history') await renderEventHistory();
+        if (page === 'activity-logs') await renderActivityLogs();
+        if (page === 'profile') await renderProfile();
         if (page === 'accounts') await renderAccounts();
         if (page === 'reports') await renderReports();
         if (page === 'notifications') await renderNotifications();
@@ -3101,18 +3121,223 @@ async function renderAccounts(status = 'pending') {
     pageContent.append(section);
 }
 
+function addReportTable(section, headers, rows, valueForCell) {
+    if (!rows.length) {
+        section.append(node('div', 'No records match these filters.', 'empty'));
+        return;
+    }
+    const table = node('table', undefined, 'proposal-table report-table');
+    const head = node('thead');
+    const headerRow = node('tr');
+    headers.forEach(label => headerRow.append(node('th', label)));
+    head.append(headerRow);
+    const body = node('tbody');
+    rows.forEach(row => {
+        const tableRow = node('tr');
+        valueForCell(row).forEach(value => tableRow.append(node('td', value ?? '—')));
+        body.append(tableRow);
+    });
+    table.append(head, body);
+    const tableWrap = node('div', undefined, 'proposal-table-wrap report-table-wrap');
+    tableWrap.append(table);
+    section.append(tableWrap);
+}
+
+function reportFilterForm() {
+    const form = node('form', undefined, 'panel-form report-filter-form');
+    form.innerHTML = '<label>From<input name="from" type="date" required></label><label>To<input name="to" type="date" required></label>';
+    const today = new Date();
+    form.elements.from.value = localDateInputValue(new Date(today.getFullYear(), today.getMonth(), 1));
+    form.elements.to.value = localDateInputValue(today);
+    return form;
+}
+
+async function renderEvaluationReports() {
+    const section = panel('Volunteer Evaluation & Feedback', 'Review submitted volunteer feedback and rating trends for events you manage.');
+    const form = reportFilterForm();
+    const output = node('div', undefined, 'evaluation-report-results');
+    const loadReports = async () => {
+        const query = new URLSearchParams({ from: form.elements.from.value, to: form.elements.to.value });
+        const result = await request(`/evaluation-reports?${query}`);
+        output.replaceChildren();
+        const summary = node('div', undefined, 'dashboard-metrics');
+        [
+            ['Responses', result.summary.responses],
+            ['Average rating', `${result.summary.average_rating} / 5`],
+            ['Positive (4–5)', result.summary.positive_responses],
+            ['Events evaluated', result.summary.events_evaluated]
+        ].forEach(([label, value]) => {
+            const card = node('article', undefined, 'metric-card dashboard-metric');
+            card.append(node('span', label), node('strong', value));
+            summary.append(card);
+        });
+        output.append(summary);
+        const distribution = panel('Rating distribution');
+        const distributionList = node('div', undefined, 'record-list');
+        for (let rating = 5; rating >= 1; rating--) {
+            const row = result.distribution.find(item => Number(item.rating) === rating);
+            const record = node('article', undefined, 'record');
+            record.append(node('div', `${rating} / 5`, 'record-main'), node('span', `${row?.responses || 0} response(s)`, 'badge'));
+            distributionList.append(record);
+        }
+        distribution.append(distributionList);
+        output.append(distribution);
+        const responses = panel('Volunteer responses');
+        addReportTable(responses, ['Event', 'Project', 'Volunteer', 'Rating', 'Feedback', 'Submitted'], result.evaluations,
+            item => [item.event_title, item.project_title, item.volunteer, `${item.rating} / 5`, item.feedback, dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })]);
+        output.append(responses);
+    };
+    const updateReports = async () => {
+        if (!form.reportValidity()) return;
+        try {
+            await loadReports();
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        }
+    };
+    form.addEventListener('submit', event => event.preventDefault());
+    form.elements.from.addEventListener('change', updateReports);
+    form.elements.to.addEventListener('change', updateReports);
+    section.append(form);
+    pageContent.append(section, output);
+    await loadReports();
+}
+
+async function renderEventHistory() {
+    const { events, documents, certificates } = await request('/event-history');
+    const section = panel('Event History & Documentations', 'Archive of completed community-extension events, supporting files, and issued participation certificates.');
+    const completed = panel('Completed events');
+    addReportTable(completed, ['Event', 'Project', 'Schedule', 'Present volunteers'], events,
+        item => [item.title, item.project_title, `${item.date_start} – ${item.date_end}`, item.attendance_count]);
+    const files = panel('Project / personal documentation');
+    addReportTable(files, ['File', 'Project / event', 'Type', 'Description', 'Uploaded'], documents,
+        item => [item.original_name, item.project_title, item.document_type, item.description || '—', dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })]);
+    if (documents.length) {
+        const links = node('div', undefined, 'record-list');
+        documents.forEach(item => {
+            const record = node('article', undefined, 'record');
+            const info = node('div', undefined, 'record-main');
+            info.append(node('strong', item.original_name), node('small', `${item.project_title} · ${item.document_type}`));
+            const link = node('a', 'Open file', 'button button-quiet button-small');
+            link.href = currentUser.role === 'volunteer'
+                ? `${API}/volunteer/documentations/${encodeURIComponent(item.id)}/file`
+                : `${API}/documents/${encodeURIComponent(item.id)}`;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            const actions = node('div', undefined, 'record-actions');
+            actions.append(link);
+            record.append(info, actions);
+            links.append(record);
+        });
+        files.append(links);
+    }
+    const certificateSection = panel('Certificates issued');
+    if (!certificates.length) certificateSection.append(node('div', 'No certificates are available in this archive.', 'empty'));
+    certificates.forEach(item => {
+        const record = node('article', undefined, 'record');
+        const info = node('div', undefined, 'record-main');
+        info.append(node('strong', item.event_title), node('small', `${item.project_title} · Issued ${dashboardDate(item.issued_at, { month: 'short', day: 'numeric', year: 'numeric' })}`));
+        const link = node('a', 'Download certificate', 'button button-quiet button-small');
+        link.href = `${API}/certificates/${encodeURIComponent(item.id)}`;
+        const actions = node('div', undefined, 'record-actions');
+        actions.append(link);
+        record.append(info, actions);
+        certificateSection.append(record);
+    });
+    pageContent.append(section, completed, files, certificateSection);
+}
+
+async function renderActivityLogs() {
+    const section = panel('Activity Logs', 'Administrative audit trail for account, proposal, event, and attendance changes. Results are limited to the latest 500 matching records.');
+    const form = node('form', undefined, 'panel-form report-filter-form');
+    form.innerHTML = '<label>From<input name="from" type="date"></label><label>To<input name="to" type="date"></label><label>Search<input name="search" type="search" maxlength="120" placeholder="Action, actor, or record"></label><button class="button button-primary" type="submit">Filter logs</button>';
+    const output = node('div', undefined, 'activity-log-results');
+    const loadLogs = async () => {
+        const query = new URLSearchParams(Object.fromEntries(new FormData(form)));
+        const { logs } = await request(`/activity-logs?${query}`);
+        output.replaceChildren();
+        addReportTable(output, ['Timestamp', 'Actor', 'Role', 'Action', 'Record', 'Details', 'IP address'], logs,
+            item => [dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }), item.actor_name || 'Deleted account', item.actor_role, item.action, item.entity_type ? `${item.entity_type}${item.entity_id ? ` #${item.entity_id}` : ''}` : '—', item.details || '—', item.ip_address || '—']);
+    };
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        try {
+            await loadLogs();
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        }
+    });
+    section.append(form);
+    pageContent.append(section, output);
+    await loadLogs();
+}
+
+async function renderProfile() {
+    const { profile } = await request('/profile');
+    const section = panel('My Profile', 'Update your contact details and change your password. Your email and verified classification cannot be changed here.');
+    const form = node('form', undefined, 'panel-form profile-form');
+    const partnerFields = currentUser.role === 'partner'
+        ? '<label>Organization name<input name="organizationName" maxlength="190" required></label><label>Representative designation<input name="officialDesignation" maxlength="190"></label>'
+        : '';
+    const classification = currentUser.role === 'volunteer'
+        ? `<label>Volunteer classification<input value="${String(profile.registration_classification || profile.volunteer_type || 'Not provided').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])}" readonly></label><label>Affiliation<input value="${String(profile.affiliation_name || profile.campus || 'Not provided').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character])}" readonly></label>`
+        : '';
+    form.innerHTML = `<div class="form-grid"><label>First name<input name="firstName" maxlength="100" required></label><label>Last name<input name="lastName" maxlength="100" required></label></div><label>Email address<input name="email" type="email" readonly></label><label>Contact number<input name="contactNumber" type="tel" maxlength="40" required></label>${partnerFields}${classification}<label>Current password <span class="field-hint">Required only to change your password</span><input name="currentPassword" type="password" autocomplete="current-password"></label><label>New password <span class="field-hint">At least 12 characters; leave blank to keep current password</span><input name="newPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password"></label><label>Confirm new password<input name="confirmation" type="password" minlength="12" maxlength="200" autocomplete="new-password"></label><button class="button button-primary" type="submit">Save profile</button>`;
+    form.elements.firstName.value = profile.first_name;
+    form.elements.lastName.value = profile.last_name;
+    form.elements.email.value = profile.email;
+    form.elements.contactNumber.value = profile.contact_number || '';
+    if (currentUser.role === 'partner') {
+        form.elements.organizationName.value = profile.organization_name || '';
+        form.elements.officialDesignation.value = profile.official_designation || '';
+    }
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        try {
+            const body = Object.fromEntries(new FormData(form));
+            await request('/profile', { method: 'PUT', body: JSON.stringify(body) });
+            currentUser.firstName = body.firstName;
+            currentUser.lastName = body.lastName;
+            document.querySelector('#user-label').textContent = `${body.firstName} ${body.lastName} · ${currentUser.role}`;
+            form.elements.currentPassword.value = '';
+            form.elements.newPassword.value = '';
+            form.elements.confirmation.value = '';
+            showMessage(pageMessage, 'Profile updated successfully.');
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        } finally {
+            submit.disabled = false;
+        }
+    });
+    section.append(form);
+    if (profile.account_status) section.append(node('p', `Account status: ${dashboardStatusLabel(profile.account_status)}`, 'profile-account-status'));
+    if (currentUser.role === 'volunteer' && Number(profile.proof_available)) {
+        const proof = button('View uploaded identification document', 'profile-proof', 'button button-quiet');
+        section.append(proof);
+    }
+    pageContent.append(section);
+}
+
 async function renderReports() {
-    const section = panel('Non-financial module reports', 'Choose a CES data module, set the required date range, then apply optional filters or export the results.');
-    const form = node('form', undefined, 'panel-form');
-    form.innerHTML = '<label>Report module<select name="module"><option value="projects">Projects</option><option value="partners">Partners</option><option value="events">Events</option><option value="applications">Volunteer applications</option><option value="attendance">Daily attendance</option><option value="participants">Participants</option><option value="evaluations">Evaluations</option><option value="certificates">Certificates</option><option value="documents">Documentation</option></select></label><label>From<input name="from" type="date" required></label><label>To<input name="to" type="date" required></label><label>Status<select name="status"><option value="">All statuses</option></select></label><label>Partner<select name="partner"><option value="">All partners</option></select></label><label>Category<select name="category"><option value="">All categories</option></select></label><label>Search<input name="search" type="search"></label><button class="button button-primary" type="submit">Run report</button><button class="button button-quiet" type="button" data-action="export-report" data-format="csv">Export CSV</button><button class="button button-quiet" type="button" data-action="export-report" data-format="pdf">Export PDF</button>';
+    const section = panel('System-wide Reports', 'System analytics for proposals, events, volunteers, partners, feedback, and documentation.');
+    section.classList.add('system-reports');
+    const form = node('form', undefined, 'report-toolbar');
+    form.innerHTML = '<label class="report-module-select">Report Module<select name="module"><option value="projects">Proposals &amp; Projects</option><option value="events">Events</option><option value="volunteer_engagement">Volunteers</option><option value="partners">Partners &amp; Departments</option><option value="evaluations">Evaluations</option><option value="documents">Documentations</option><option value="applications">Volunteer Applications</option><option value="attendance">Attendance Check-ins</option><option value="participants">Community Participants</option><option value="certificates">Certificates Issued</option></select></label><details class="report-filter-drawer"><summary><svg aria-hidden="true" viewBox="0 0 20 20" width="16" height="16" fill="none"><path d="M3 5h14M5.5 10h9M8 15h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg> Filter Options</summary><div class="report-filter-grid"><label>From<input name="from" type="date" required></label><label>To<input name="to" type="date" required></label><label>Status<select name="status"><option value="">All statuses</option></select></label><label>Partner<select name="partner"><option value="">All partners</option></select></label><label>Category / Classification<select name="category"><option value="">All categories</option></select></label><label>Search<input name="search" type="search" placeholder="Search report records"></label></div></details><details class="report-export-menu"><summary>Export Data <span aria-hidden="true">⌄</span></summary><div class="report-export-options"><button class="button button-quiet button-small" type="button" data-action="export-report" data-format="csv">Export CSV</button><button class="button button-quiet button-small" type="button" data-action="export-report" data-format="pdf">Export PDF</button></div></details>';
+    const today = new Date();
+    form.elements.from.value = localDateInputValue(new Date(today.getFullYear(), today.getMonth(), 1));
+    form.elements.to.value = localDateInputValue(today);
     const statusOptions = {
         projects: ['draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected'],
         partners: ['pending', 'approved', 'rejected', 'disabled'],
-        events: ['draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected'],
+        events: ['upcoming', 'ongoing', 'completed'],
         applications: ['pending', 'approved', 'rejected', 'withdrawn'],
         attendance: ['present', 'absent', 'excused'],
         participants: ['recorded'],
         evaluations: ['completed'],
+        volunteer_engagement: ['attended'],
         certificates: ['issued'],
         documents: ['signed', 'unsigned']
     };
@@ -3122,14 +3347,16 @@ async function renderReports() {
         statusOptions[form.elements.module.value].forEach(status => select.add(new Option(dashboardStatusLabel(status), status)));
     };
     refreshStatusOptions();
-    form.elements.module.addEventListener('change', refreshStatusOptions);
     const [partnersResult, categoriesResult] = await Promise.all([request('/collaborators/partners'), request('/categories')]);
     const partnerSelect = form.elements.partner;
     partnersResult.partners.forEach(partner => partnerSelect.add(new Option(partner.organization_name, partner.id)));
     const categorySelect = form.elements.category;
     const refreshCategories = () => {
         categorySelect.replaceChildren(new Option('All categories', ''));
-        if (form.elements.module.value === 'partners') {
+        if (form.elements.module.value === 'volunteer_engagement') {
+            ['UCC Student / Faculty / Staff', 'External Guest / Community Resident', 'Organization / Private Sector Representative', 'student', 'professor', 'tanod', 'civilian', 'other']
+                .forEach(category => categorySelect.add(new Option(category, category)));
+        } else if (form.elements.module.value === 'partners') {
             Array.from(new Set(partnersResult.partners.map(partner => partner.organization_type)))
                 .sort()
                 .forEach(category => categorySelect.add(new Option(category, category)));
@@ -3138,55 +3365,126 @@ async function renderReports() {
         }
     };
     refreshCategories();
-    form.elements.module.addEventListener('change', refreshCategories);
-    form.addEventListener('submit', async event => {
-        event.preventDefault();
-        const query = new URLSearchParams(Object.fromEntries(new FormData(form)));
-        try {
-            const result = await request(`/reports?${query}`);
-            const priorResults = pageContent.querySelector('.report-results');
-            priorResults?.remove();
-            if (result.rows) {
-                const table = node('table', undefined, 'proposal-table report-table');
-                table.innerHTML = '<thead><tr><th scope="col">Record</th><th scope="col">Related project / context</th><th scope="col">Status</th><th scope="col">Date</th><th scope="col">Details</th></tr></thead>';
-                const body = node('tbody');
-                result.rows.forEach(row => {
-                    const tableRow = node('tr');
-                    tableRow.append(
-                        node('td', row.subject),
-                        node('td', row.context || '—'),
-                        node('td', row.status || '—'),
-                        node('td', row.report_date || '—'),
-                        node('td', row.details || '—')
-                    );
-                    body.append(tableRow);
-                });
-                table.append(body);
-                const results = node('div', undefined, 'proposal-table-wrap report-results');
-                results.dataset.total = result.rows.length;
-                if (!result.rows.length) results.append(node('div', 'No records match these filters.', 'empty'));
-                else results.append(table);
-                pageContent.append(results);
-                return;
-            }
-            const output = node('div', undefined, 'record-list');
-            if (!result.projects.length) output.append(node('div', 'No projects match these filters.', 'empty'));
-            result.projects.forEach(project => {
-                const record = node('article', undefined, 'record');
-                const info = node('div', `${project.title} · ${project.period_start || 'Unscheduled'} · ${project.event_count} event(s)`, 'record-main');
-                const actions = node('div', undefined, 'record-actions');
-                actions.append(node('span', project.status.replaceAll('_', ' '), 'badge'), button('Project dossier', `dossier-${project.id}`));
-                record.append(info, actions);
-                output.append(record);
-            });
-            output.classList.add('report-results');
-            pageContent.append(output);
-        } catch (error) {
-            showMessage(pageMessage, error.message, 'error');
+    const metrics = node('div', undefined, 'report-summary-grid');
+    const results = node('section', undefined, 'report-results');
+    results.setAttribute('aria-live', 'polite');
+    const renderSkeleton = () => {
+        metrics.replaceChildren();
+        for (let index = 0; index < 4; index++) {
+            const card = node('article', undefined, 'report-metric-card is-loading');
+            card.append(node('span', '', 'report-skeleton report-skeleton-label'), node('strong', '', 'report-skeleton report-skeleton-value'));
+            metrics.append(card);
         }
+        results.replaceChildren();
+        const loading = node('div', undefined, 'report-loading-state');
+        for (let row = 0; row < 6; row++) {
+            const skeletonRow = node('div', undefined, 'report-skeleton-row');
+            for (let column = 0; column < 5; column++) skeletonRow.append(node('span', '', 'report-skeleton'));
+            loading.append(skeletonRow);
+        }
+        results.append(loading);
+        results.setAttribute('aria-busy', 'true');
+    };
+    const renderResult = (result, module) => {
+        metrics.replaceChildren();
+        const summary = result.summary || {};
+        [
+            ['Total Records', module === 'projects' ? summary.projects : summary.records],
+            ['Active / Completed', summary.active_completed ?? 0],
+            ['Engaged Partners / Departments', summary.engaged_partners ?? 0],
+            ['Total Headcount / Participants', summary.headcount ?? 0]
+        ].forEach(([label, value]) => {
+            const card = node('article', undefined, 'report-metric-card');
+            card.append(node('span', label), node('strong', Number(value || 0).toLocaleString()));
+            metrics.append(card);
+        });
+        results.replaceChildren();
+        results.removeAttribute('aria-busy');
+        const rows = module === 'projects' ? (result.projects || []) : (result.rows || []);
+        if (!rows.length) {
+            const empty = node('div', undefined, 'report-empty-state');
+            empty.append(node('span', '✓', 'report-empty-icon'), node('strong', 'No matching records'), node('p', 'Try changing the module, date range, or filters.'));
+            results.append(empty);
+            return;
+        }
+        const columnSets = {
+            projects: [['Proposal / Project', item => item.title], ['Proposer', item => item.proposer], ['Status', item => dashboardStatusLabel(item.status)], ['Period', item => `${item.period_start || 'Unscheduled'} – ${item.period_end || 'Unscheduled'}`], ['Partners', item => item.partner_count], ['Events', item => item.event_count], ['Budget', item => `₱${Number(item.total_estimated_cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`]],
+            partners: [['Organization', item => item.subject], ['Type', item => item.context], ['Account status', item => dashboardStatusLabel(item.status)], ['Registered', item => dashboardDate(item.report_date, { month: 'short', day: 'numeric', year: 'numeric' })], ['Engagement', item => item.details]],
+            events: [['Event', item => item.subject], ['Project', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Schedule', item => item.report_date], ['Headcount', item => item.metric_value], ['Summary', item => item.details]],
+            volunteer_engagement: [['Volunteer', item => item.subject], ['Event', item => item.context], ['Classification', item => item.category], ['Hours', item => item.metric_value], ['Last attendance', item => item.report_date]],
+            evaluations: [['Event', item => item.subject], ['Project', item => item.context], ['Rating', item => item.rating_value ? `${item.rating_value} / 5` : '—'], ['Submitted', item => item.report_date], ['Feedback', item => item.details]],
+            documents: [['Project', item => item.subject], ['Document type', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Uploaded', item => item.report_date], ['File', item => item.details]],
+            applications: [['Applicant', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Applied', item => item.report_date]],
+            attendance: [['Volunteer', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Attendance', item => dashboardStatusLabel(item.status)], ['Check-in', item => item.report_date]],
+            participants: [['Event', item => item.subject], ['Project', item => item.context], ['Group', item => item.details], ['Participants', item => item.metric_value], ['Recorded', item => item.report_date]],
+            certificates: [['Volunteer', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Issued', item => item.report_date]]
+        };
+        const columns = columnSets[module] || columnSets.projects;
+        const table = node('table', undefined, 'proposal-table report-table');
+        const head = node('thead');
+        const header = node('tr');
+        columns.forEach(([label]) => header.append(node('th', label)));
+        if (module === 'projects') header.append(node('th', 'Details'));
+        head.append(header);
+        const body = node('tbody');
+        rows.forEach(item => {
+            const row = node('tr');
+            columns.forEach(([, getValue]) => row.append(node('td', getValue(item) ?? '—')));
+            if (module === 'projects') {
+                const actions = node('td');
+                actions.append(button('View dossier', `dossier-${item.id}`, 'button button-quiet button-small'));
+                row.append(actions);
+            }
+            body.append(row);
+        });
+        table.append(head, body);
+        const tableWrap = node('div', undefined, 'proposal-table-wrap report-table-wrap');
+        tableWrap.append(table);
+        results.append(tableWrap);
+    };
+    let requestSequence = 0;
+    let searchTimer = 0;
+    let activeController = null;
+    const fetchReport = async () => {
+        if (!form.reportValidity()) return;
+        if (form.elements.from.value > form.elements.to.value) {
+            showMessage(pageMessage, 'The end date cannot be earlier than the start date.', 'error');
+            results.replaceChildren();
+            results.removeAttribute('aria-busy');
+            return;
+        }
+        const sequence = ++requestSequence;
+        activeController?.abort();
+        activeController = new AbortController();
+        const module = form.elements.module.value;
+        const query = new URLSearchParams(Object.fromEntries(new FormData(form)));
+        clearMessage(pageMessage);
+        renderSkeleton();
+        try {
+            const result = await request(`/reports?${query}`, { signal: activeController.signal });
+            if (sequence === requestSequence && section.isConnected) renderResult(result, module);
+        } catch (error) {
+            if (error.name !== 'AbortError' && sequence === requestSequence && section.isConnected) {
+                results.replaceChildren();
+                results.removeAttribute('aria-busy');
+                showMessage(pageMessage, error.message, 'error');
+            }
+        }
+    };
+    form.addEventListener('submit', event => event.preventDefault());
+    form.elements.module.addEventListener('change', () => {
+        refreshStatusOptions();
+        refreshCategories();
+        fetchReport();
+    });
+    ['status', 'partner', 'category', 'from', 'to'].forEach(name => form.elements[name].addEventListener('change', fetchReport));
+    form.elements.search.addEventListener('input', () => {
+        window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(fetchReport, 300);
     });
     section.append(form);
-    pageContent.append(section);
+    pageContent.append(section, metrics, results);
+    await fetchReport();
 }
 
 async function renderNotifications() {
@@ -3224,6 +3522,22 @@ pageContent.addEventListener('click', async event => {
             openVolunteerCheckin(Number(actionButton.dataset.eventId), Number(actionButton.dataset.eventDateId));
         } else if (actionButton.dataset.action === 'print-event-detail') {
             window.print();
+        } else if (actionButton.dataset.action === 'export-report') {
+            const form = actionButton.closest('form');
+            if (!form || !form.reportValidity()) {
+                actionButton.disabled = false;
+                return;
+            }
+            if (form.elements.from.value > form.elements.to.value) {
+                showMessage(pageMessage, 'The end date cannot be earlier than the start date.', 'error');
+                actionButton.disabled = false;
+                return;
+            }
+            const query = new URLSearchParams(Object.fromEntries(new FormData(form)));
+            query.set('format', actionButton.dataset.format);
+            window.open(`${API}/reports?${query}`, '_blank', 'noopener');
+        } else if (actionButton.dataset.action === 'profile-proof') {
+            window.open(`${API}/volunteer/profile/proof`, '_blank', 'noopener');
         } else if (action === 'viewevent') {
             await navigateToEvent(Number(id));
         } else if (action === 'submit') {
