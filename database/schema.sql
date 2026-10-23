@@ -10,6 +10,7 @@ CREATE TABLE users (
     password_change_required TINYINT(1) NOT NULL DEFAULT 0,
     role ENUM('admin', 'partner', 'volunteer') NOT NULL,
     account_status ENUM('pending', 'approved', 'rejected', 'disabled') NOT NULL DEFAULT 'pending',
+    rejection_reason TEXT NULL,
     first_name VARCHAR(100) NOT NULL,
     last_name VARCHAR(100) NOT NULL,
     contact_number VARCHAR(40) NOT NULL,
@@ -24,6 +25,9 @@ CREATE TABLE partners (
     user_id BIGINT UNSIGNED NOT NULL,
     organization_name VARCHAR(190) NOT NULL,
     organization_type ENUM('NGA', 'LGU', 'NGO', 'Private Sector', 'BPO', 'Church', 'UCC Department', 'College', 'Barangay', 'Other') NOT NULL,
+    organization_category VARCHAR(120) NOT NULL DEFAULT 'Other',
+    official_designation VARCHAR(190) NULL,
+    verification_path VARCHAR(500) NULL,
     address VARCHAR(500) NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id),
@@ -42,6 +46,7 @@ CREATE TABLE volunteer_profiles (
     year_section VARCHAR(100) NULL,
     barangay VARCHAR(190) NULL,
     affiliation_proof_path VARCHAR(500) NULL,
+    registration_classification VARCHAR(100) NULL,
     PRIMARY KEY (user_id),
     UNIQUE KEY uq_volunteer_student_number (student_number),
     CONSTRAINT fk_volunteer_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
@@ -93,6 +98,15 @@ CREATE TABLE proposals (
     owner_user_id BIGINT UNSIGNED NOT NULL,
     title VARCHAR(190) NOT NULL,
     summary TEXT NOT NULL,
+    proponents JSON NOT NULL,
+    activity_components JSON NOT NULL,
+    estimated_cost_items JSON NOT NULL,
+    total_estimated_cost DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    justification TEXT NOT NULL,
+    target_beneficiaries TEXT NOT NULL,
+    target_outputs TEXT NOT NULL,
+    possible_risks TEXT NOT NULL,
+    expected_private_partnerships TEXT NULL,
     status ENUM('draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected') NOT NULL DEFAULT 'draft',
     period_start DATE NULL,
     period_end DATE NULL,
@@ -146,6 +160,7 @@ CREATE TABLE documents (
     original_name VARCHAR(255) NOT NULL,
     mime_type VARCHAR(100) NOT NULL,
     file_size BIGINT UNSIGNED NOT NULL,
+    description VARCHAR(500) NULL,
     is_signed TINYINT(1) NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -168,6 +183,17 @@ CREATE TABLE events (
     KEY idx_events_proposal (proposal_id),
     CONSTRAINT fk_events_proposal FOREIGN KEY (proposal_id) REFERENCES proposals (id) ON DELETE CASCADE,
     CONSTRAINT fk_events_organizer FOREIGN KEY (organizer_user_id) REFERENCES users (id)
+) ENGINE=InnoDB;
+
+CREATE TABLE event_partners (
+    event_id BIGINT UNSIGNED NOT NULL,
+    partner_user_id BIGINT UNSIGNED NOT NULL,
+    relationship ENUM('organizer', 'collaborator') NOT NULL DEFAULT 'collaborator',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (event_id, partner_user_id),
+    KEY idx_event_partners_user (partner_user_id, event_id),
+    CONSTRAINT fk_event_partners_event FOREIGN KEY (event_id) REFERENCES events (id) ON DELETE CASCADE,
+    CONSTRAINT fk_event_partners_partner FOREIGN KEY (partner_user_id) REFERENCES partners (user_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE event_dates (

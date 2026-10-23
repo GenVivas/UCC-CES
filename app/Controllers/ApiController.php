@@ -90,7 +90,7 @@ final class ApiController
             $this->reviewAccount(Http::positiveId($matches[1]));
         }
         if (preg_match('#^/accounts/([0-9]+)/proof$#', $path, $matches) && $method === 'GET') {
-            $this->downloadVolunteerProof(Http::positiveId($matches[1]));
+            $this->downloadAccountProof(Http::positiveId($matches[1]));
         }
         if ($path === '/proposals' && $method === 'GET') {
             $this->listProposals();
@@ -100,6 +100,9 @@ final class ApiController
         }
         if (preg_match('#^/proposals/([0-9]+)/edit-data$#', $path, $matches) && $method === 'GET') {
             $this->proposalEditData(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/proposals/([0-9]+)/brief\.pdf$#', $path, $matches) && $method === 'GET') {
+            $this->downloadProjectBrief(Http::positiveId($matches[1]));
         }
         if (preg_match('#^/proposals/([0-9]+)$#', $path, $matches) && $method === 'PUT') {
             $this->updateProposal(Http::positiveId($matches[1]));
@@ -140,8 +143,14 @@ final class ApiController
         if ($path === '/events' && $method === 'GET') {
             $this->listEvents();
         }
+        if ($path === '/partner/calendar' && $method === 'GET') {
+            $this->partnerCalendar();
+        }
         if (preg_match('#^/event-dates/([0-9]+)/attendance$#', $path, $matches) && $method === 'GET') {
             $this->listDateAttendance(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/events/([0-9]+)/attendance-export$#', $path, $matches) && $method === 'GET') {
+            $this->exportEventAttendance(Http::positiveId($matches[1]));
         }
         if (preg_match('#^/events/([0-9]+)/apply$#', $path, $matches) && $method === 'POST') {
             $this->applyToEvent(Http::positiveId($matches[1]));
@@ -205,6 +214,7 @@ final class ApiController
         }
         $email = strtolower(trim((string) ($data['email'] ?? '')));
         $password = (string) ($data['password'] ?? '');
+        $confirmation = (string) ($data['confirmation'] ?? '');
         $firstName = trim((string) ($data['firstName'] ?? ''));
         $lastName = trim((string) ($data['lastName'] ?? ''));
         $contact = trim((string) ($data['contactNumber'] ?? ''));
@@ -214,13 +224,51 @@ final class ApiController
         if (strlen($password) < 12 || strlen($password) > 200) {
             throw new RuntimeException('Password must be at least 12 characters long.');
         }
+        if (!hash_equals($password, $confirmation)) {
+            throw new RuntimeException('Password and confirmation do not match.');
+        }
         if ($firstName === '' || $lastName === '' || $contact === '') {
             throw new RuntimeException('First name, last name, and contact number are required.');
+        }
+        if (strlen($firstName) > 100 || strlen($lastName) > 100 || strlen($contact) > 40) {
+            throw new RuntimeException('Name or contact number is longer than allowed.');
+        }
+        $partnerDetails = null;
+        $volunteerDetails = null;
+        if ($role === 'partner') {
+            $category = (string) ($data['organizationCategory'] ?? '');
+            $categories = [
+                'UCC Department / Academic Unit' => 'UCC Department',
+                'Local Government Unit (LGU / Barangay)' => 'LGU',
+                'Government Agency (e.g., MMDA, DSWD)' => 'NGA',
+                'NGO / Non-Profit Organization' => 'NGO',
+                'Private Sector / Corporate Partner' => 'Private Sector',
+            ];
+            $name = trim((string) ($data['organizationName'] ?? ''));
+            $designation = trim((string) ($data['officialDesignation'] ?? ''));
+            if ($name === '' || strlen($name) > 190 || !isset($categories[$category]) ||
+                $designation === '' || strlen($designation) > 190) {
+                throw new RuntimeException('Enter an organization name, valid category, and official designation.');
+            }
+            $partnerDetails = [$name, $categories[$category], $category, $designation];
+        } else {
+            $classification = (string) ($data['volunteerClassification'] ?? '');
+            $classifications = [
+                'UCC Student / Faculty / Staff' => 'other',
+                'External Guest / Community Resident' => 'civilian',
+                'Organization / Private Sector Representative' => 'other',
+            ];
+            $affiliation = trim((string) ($data['affiliationName'] ?? ''));
+            if (!isset($classifications[$classification]) || $affiliation === '' || strlen($affiliation) > 190) {
+                throw new RuntimeException('Choose a volunteer classification and enter an affiliation, school, or company.');
+            }
+            $volunteerDetails = [$classification, $classifications[$classification], $affiliation];
         }
         if ($this->findUserByEmail($email)) {
             throw new RuntimeException('An account with this email already exists.');
         }
 
+        $proofPath = '';
         $this->db->beginTransaction();
         try {
             $insert = $this->db->prepare(
@@ -228,23 +276,30 @@ final class ApiController
             );
             $insert->execute([$email, password_hash($password, PASSWORD_DEFAULT), $role, $firstName, $lastName, $contact]);
             $userId = (int) $this->db->lastInsertId();
+            $proofPath = $this->storeUpload('proof', 'ids', true);
 
             if ($role === 'partner') {
-                $organization = trim((string) ($data['organizationName'] ?? ''));
-                $organizationType = (string) ($data['organizationType'] ?? '');
-                $allowedTypes = ['NGA', 'LGU', 'NGO', 'Private Sector', 'BPO', 'Church', 'UCC Department', 'College', 'Barangay', 'Other'];
-                if ($organization === '' || !in_array($organizationType, $allowedTypes, true)) {
-                    throw new RuntimeException('Organization name and a valid organization type are required.');
-                }
-                $partner = $this->db->prepare('INSERT INTO partners (user_id, organization_name, organization_type, address) VALUES (?, ?, ?, ?)');
-                $partner->execute([$userId, $organization, $organizationType, trim((string) ($data['address'] ?? '')) ?: null]);
+                [$name, $organizationType, $category, $designation] = $partnerDetails;
+                $partner = $this->db->prepare(
+                    'INSERT INTO partners (user_id, organization_name, organization_type, address, organization_category, official_designation, verification_path)
+                     VALUES (?, ?, ?, NULL, ?, ?, ?)'
+                );
+                $partner->execute([$userId, $name, $organizationType, $category, $designation, $proofPath]);
             } else {
-                $this->insertVolunteerProfile($userId, $data);
+                [$classification, $legacyType, $affiliation] = $volunteerDetails;
+                $volunteer = $this->db->prepare(
+                    'INSERT INTO volunteer_profiles (user_id, volunteer_type, affiliation_name, affiliation_proof_path, registration_classification)
+                     VALUES (?, ?, ?, ?, ?)'
+                );
+                $volunteer->execute([$userId, $legacyType, $affiliation, $proofPath, $classification]);
             }
             $this->db->commit();
         } catch (Throwable $exception) {
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
+            }
+            if ($proofPath !== '') {
+                $this->removeStoredUpload($proofPath);
             }
             if ($exception instanceof \PDOException && $exception->getCode() === '23000') {
                 throw new RuntimeException('Email or profile identifier is already registered.', 409, $exception);
@@ -254,55 +309,6 @@ final class ApiController
         $this->notifyAdmins('New account registration', sprintf('%s %s registered as a %s and is awaiting approval.', $firstName, $lastName, $role));
 
         Http::json(['message' => 'Registration received. An administrator must approve your account before sign-in.'], 201);
-    }
-
-    private function insertVolunteerProfile(int $userId, array $data): void
-    {
-        $type = (string) ($data['volunteerType'] ?? '');
-        if (!in_array($type, ['student', 'professor', 'tanod', 'civilian', 'other'], true)) {
-            throw new RuntimeException('Choose a valid volunteer type.');
-        }
-        $studentNumber = strtoupper(trim((string) ($data['studentNumber'] ?? '')));
-        $facultyId = trim((string) ($data['facultyId'] ?? ''));
-        $tanodId = trim((string) ($data['tanodId'] ?? ''));
-        $affiliation = trim((string) ($data['affiliationName'] ?? ''));
-        $campus = trim((string) ($data['campus'] ?? ''));
-        $course = trim((string) ($data['courseProgram'] ?? ''));
-        $barangay = trim((string) ($data['barangay'] ?? ''));
-
-        if ($type === 'student' && !preg_match('/^\d{8}-[NS]$/', $studentNumber)) {
-            throw new RuntimeException('Student number must be 8 digits followed by -N or -S.');
-        }
-        if ($type === 'professor' && $facultyId === '') {
-            throw new RuntimeException('Faculty ID is required.');
-        }
-        if ($type === 'tanod' && ($tanodId === '' || $barangay === '')) {
-            throw new RuntimeException('Tanod ID and assigned barangay are required.');
-        }
-        if (in_array($type, ['civilian', 'other'], true) && $affiliation === '') {
-            throw new RuntimeException('Affiliation details are required.');
-        }
-        if ($type === 'student' && ($campus === '' || $course === '')) {
-            throw new RuntimeException('Campus and course/program are required.');
-        }
-
-        $proofPath = $this->storeUpload('proof', 'ids', true);
-        $statement = $this->db->prepare(
-            'INSERT INTO volunteer_profiles (user_id, volunteer_type, student_number, faculty_id, tanod_id, affiliation_name, campus, course_program, year_section, barangay, affiliation_proof_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        $statement->execute([
-            $userId,
-            $type,
-            $studentNumber ?: null,
-            $facultyId ?: null,
-            $tanodId ?: null,
-            $affiliation ?: null,
-            $campus ?: null,
-            $course ?: null,
-            trim((string) ($data['yearSection'] ?? '')) ?: null,
-            $barangay ?: null,
-            $proofPath,
-        ]);
     }
 
     private function login(): never
@@ -494,7 +500,8 @@ final class ApiController
                 'recentActions' => $this->recentAdminActions((int) $user['id']),
             ]);
         } elseif ($user['role'] === 'partner') {
-            $counts = $this->ownedProposalCounts((int) $user['id']);
+            $partnerDashboard = $this->partnerDashboard((int) $user['id']);
+            $counts = $partnerDashboard['counts'];
         } else {
             $statement = $this->db->prepare(
                 "SELECT
@@ -504,7 +511,10 @@ final class ApiController
             $statement->execute([(int) $user['id'], (int) $user['id']]);
             $counts = $statement->fetch();
         }
-        Http::json(['counts' => $counts]);
+        Http::json(array_filter([
+            'counts' => $counts,
+            'partnerDashboard' => $partnerDashboard ?? null,
+        ], static fn (mixed $value): bool => $value !== null));
     }
 
     private function recentAdminActions(int $adminId): array
@@ -524,7 +534,8 @@ final class ApiController
     {
         Http::user();
         $statement = $this->db->query(
-            "SELECT p.user_id AS id, p.organization_name, p.organization_type, p.address, u.account_status, u.email,
+            "SELECT p.user_id AS id, p.organization_name, p.organization_type, p.organization_category,
+                    p.official_designation, p.address, u.account_status, u.email,
                     GROUP_CONCAT(DISTINCT s.name ORDER BY s.name SEPARATOR ', ') AS sectors,
                     GROUP_CONCAT(DISTINCT CONCAT(s.name, ' / ', sc.name) ORDER BY s.name, sc.name SEPARATOR ', ') AS subcategories,
                     GROUP_CONCAT(DISTINCT sc.id ORDER BY sc.id SEPARATOR ',') AS subcategory_ids
@@ -534,7 +545,8 @@ final class ApiController
              LEFT JOIN subcategories sc ON sc.id = ps.subcategory_id
              LEFT JOIN sectors s ON s.id = sc.sector_id
              WHERE u.account_status = 'approved'
-             GROUP BY p.user_id, p.organization_name, p.organization_type, p.address, u.account_status, u.email
+             GROUP BY p.user_id, p.organization_name, p.organization_type, p.organization_category,
+                      p.official_designation, p.address, u.account_status, u.email
              ORDER BY p.organization_name"
         );
         $sectors = $this->db->query(
@@ -581,12 +593,20 @@ final class ApiController
         Http::requireRole('admin');
         $data = Http::body();
         $name = trim((string) ($data['organizationName'] ?? ''));
-        $type = (string) ($data['organizationType'] ?? '');
+        $category = (string) ($data['organizationCategory'] ?? '');
         $address = trim((string) ($data['address'] ?? ''));
-        $allowedTypes = ['NGA', 'LGU', 'NGO', 'Private Sector', 'BPO', 'Church', 'UCC Department', 'College', 'Barangay', 'Other'];
-        if ($name === '' || strlen($name) > 190 || !in_array($type, $allowedTypes, true) || strlen($address) > 500) {
-            throw new RuntimeException('Enter a valid organization name, type, and address.');
+        $categories = [
+            'UCC Department / Academic Unit' => 'UCC Department',
+            'Local Government Unit (LGU / Barangay)' => 'LGU',
+            'Government Agency (e.g., MMDA, DSWD)' => 'NGA',
+            'NGO / Non-Profit Organization' => 'NGO',
+            'Private Sector / Corporate Partner' => 'Private Sector',
+            'Other' => 'Other',
+        ];
+        if ($name === '' || strlen($name) > 190 || !isset($categories[$category]) || strlen($address) > 500) {
+            throw new RuntimeException('Enter a valid organization name, category, and address.');
         }
+        $type = $categories[$category];
         $subcategoryIds = $data['subcategoryIds'] ?? null;
         if (!is_array($subcategoryIds)) {
             throw new RuntimeException('Choose a valid subcategory list.');
@@ -608,8 +628,10 @@ final class ApiController
         }
         $this->db->beginTransaction();
         try {
-            $update = $this->db->prepare('UPDATE partners SET organization_name = ?, organization_type = ?, address = ? WHERE user_id = ?');
-            $update->execute([$name, $type, $address ?: null, $partnerId]);
+            $update = $this->db->prepare(
+                'UPDATE partners SET organization_name = ?, organization_type = ?, organization_category = ?, address = ? WHERE user_id = ?'
+            );
+            $update->execute([$name, $type, $category, $address ?: null, $partnerId]);
             $delete = $this->db->prepare('DELETE FROM partner_subcategories WHERE partner_user_id = ?');
             $delete->execute([$partnerId]);
             $insert = $this->db->prepare('INSERT INTO partner_subcategories (partner_user_id, subcategory_id) VALUES (?, ?)');
@@ -637,8 +659,10 @@ final class ApiController
             $params[] = $status;
         }
         $statement = $this->db->prepare(
-            'SELECT u.id, u.email, u.role, u.account_status, u.first_name, u.last_name, u.contact_number, u.created_at,
-                    p.organization_name, p.organization_type, vp.volunteer_type, vp.student_number, vp.campus
+            'SELECT u.id, u.email, u.role, u.account_status, u.rejection_reason, u.first_name, u.last_name, u.contact_number, u.created_at,
+                    p.organization_name, p.organization_type, p.organization_category, p.official_designation,
+                    p.verification_path AS partner_verification_path, vp.volunteer_type, vp.registration_classification,
+                    vp.affiliation_name, vp.student_number, vp.campus, vp.affiliation_proof_path
              FROM users u
              LEFT JOIN partners p ON p.user_id = u.id
              LEFT JOIN volunteer_profiles vp ON vp.user_id = u.id ' .
@@ -654,6 +678,17 @@ final class ApiController
         Http::requireRole('admin');
         $data = Http::body();
         $status = $data['status'] ?? '';
+        $reason = $data['reason'] ?? '';
+        if (!is_string($reason)) {
+            throw new RuntimeException('The rejection reason must be text.');
+        }
+        $reason = trim($reason);
+        if ($status === 'rejected' && $reason === '') {
+            throw new RuntimeException('A reason is required to reject an account.');
+        }
+        if (strlen($reason) > 8000) {
+            throw new RuntimeException('The rejection reason must not exceed 2000 characters.');
+        }
         $current = $this->db->prepare('SELECT account_status FROM users WHERE id = ? AND role <> ?');
         $current->execute([$id, 'admin']);
         $previousStatus = $current->fetchColumn();
@@ -669,39 +704,53 @@ final class ApiController
         if (!in_array($status, $transitions[$previousStatus] ?? [], true)) {
             throw new RuntimeException('That account status change is not allowed.');
         }
-        $statement = $this->db->prepare('UPDATE users SET account_status = ? WHERE id = ? AND role <> ? AND account_status = ?');
-        $statement->execute([$status, $id, 'admin', $previousStatus]);
+        $statement = $this->db->prepare('UPDATE users SET account_status = ?, rejection_reason = ? WHERE id = ? AND role <> ? AND account_status = ?');
+        $statement->execute([$status, $status === 'rejected' ? $reason : null, $id, 'admin', $previousStatus]);
         if ($statement->rowCount() !== 1) {
             throw new RuntimeException('Account was not found or cannot be reviewed.', 404);
         }
         if ($status !== 'disabled') {
-            $this->notifyUser($id, 'Account ' . $status, 'Your UCC-CES account has been ' . $status . '.');
+            $message = 'Your UCC-CES account has been ' . $status . '.';
+            if ($status === 'rejected') {
+                $message .= ' Reason: ' . $reason;
+            }
+            $this->notifyUser($id, 'Account ' . $status, $message);
         }
         Http::json(['message' => 'Account ' . $status . '.']);
     }
 
-    private function downloadVolunteerProof(int $userId): never
+    private function downloadAccountProof(int $userId): never
     {
         Http::requireRole('admin');
-        $statement = $this->db->prepare('SELECT affiliation_proof_path FROM volunteer_profiles WHERE user_id = ?');
+        $statement = $this->db->prepare(
+            'SELECT u.role, COALESCE(p.verification_path, vp.affiliation_proof_path) AS proof_path
+             FROM users u
+             LEFT JOIN partners p ON p.user_id = u.id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = u.id
+             WHERE u.id = ?'
+        );
         $statement->execute([$userId]);
-        $relativePath = $statement->fetchColumn();
+        $account = $statement->fetch();
+        if (!$account) {
+            throw new RuntimeException('Account was not found.', 404);
+        }
+        $relativePath = $account['proof_path'] ?? null;
         if (!$relativePath) {
-            throw new RuntimeException('Volunteer proof was not found.', 404);
+            throw new RuntimeException('Account verification document was not found.', 404);
         }
         $root = realpath($this->config['uploads_path']);
         $relativePath = preg_replace('#^uploads/#', '', $relativePath);
         $file = $root === false ? false : realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
         if ($root === false || $file === false || !str_starts_with($file, $root . DIRECTORY_SEPARATOR) || !is_file($file)) {
-            throw new RuntimeException('Stored proof could not be found.', 404);
+            throw new RuntimeException('Stored verification document could not be found.', 404);
         }
         $mime = (new \finfo(FILEINFO_MIME_TYPE))->file($file);
         if (!in_array($mime, $this->config['allowed_upload_mimes'], true)) {
-            throw new RuntimeException('Stored proof has an unsupported file type.', 415);
+            throw new RuntimeException('Stored verification document has an unsupported file type.', 415);
         }
         header('Content-Type: ' . $mime);
         header('Content-Length: ' . (string) filesize($file));
-        header('Content-Disposition: inline; filename="volunteer-proof-' . $userId . '"');
+        header('Content-Disposition: inline; filename="account-verification-' . $userId . '"');
         header('X-Content-Type-Options: nosniff');
         readfile($file);
         exit;
@@ -712,12 +761,15 @@ final class ApiController
         $user = Http::user();
         if ($user['role'] === 'admin') {
             $statement = $this->db->query(
-                'SELECT p.*, u.first_name, u.last_name, NULL AS user_relationship, NULL AS user_invitation_status
+                'SELECT p.*, u.first_name, u.last_name,
+                        (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
+                        NULL AS user_relationship, NULL AS user_invitation_status
                  FROM proposals p JOIN users u ON u.id = p.owner_user_id ORDER BY p.updated_at DESC LIMIT 250'
             );
         } else {
             $statement = $this->db->prepare(
                 'SELECT DISTINCT p.*, u.first_name, u.last_name,
+                       (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         (SELECT pp.relationship FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_relationship,
                         (SELECT pp.invitation_status FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_invitation_status
                  FROM proposals p
@@ -734,22 +786,23 @@ final class ApiController
     {
         $user = Http::requireRole('partner');
         $data = Http::body();
-        $title = trim((string) ($data['title'] ?? ''));
-        $summary = trim((string) ($data['summary'] ?? ''));
-        if ($title === '' || $summary === '') {
-            throw new RuntimeException('Proposal title and summary are required.');
-        }
-        $start = $this->optionalDate($data['periodStart'] ?? null);
-        $end = $this->optionalDate($data['periodEnd'] ?? null);
-        if ($start !== null && $end !== null && $end < $start) {
-            throw new RuntimeException('Project end date cannot precede its start date.');
-        }
+        $brief = $this->validatedProjectBrief($data);
         $this->db->beginTransaction();
         try {
             $statement = $this->db->prepare(
-                'INSERT INTO proposals (owner_user_id, title, summary, period_start, period_end, stated_duration) VALUES (?, ?, ?, ?, ?, ?)'
+                'INSERT INTO proposals
+                    (owner_user_id, title, summary, proponents, activity_components, estimated_cost_items,
+                     total_estimated_cost, justification, target_beneficiaries, target_outputs, possible_risks,
+                     expected_private_partnerships, period_start, period_end, stated_duration)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
-            $statement->execute([$user['id'], $title, $summary, $start, $end, trim((string) ($data['duration'] ?? '')) ?: null]);
+            $statement->execute([
+                $user['id'], $brief['title'], $brief['summary'], $brief['proponents'],
+                $brief['activity_components'], $brief['estimated_cost_items'], $brief['total_estimated_cost'],
+                $brief['justification'], $brief['target_beneficiaries'], $brief['target_outputs'],
+                $brief['possible_risks'], $brief['expected_private_partnerships'], $brief['period_start'],
+                $brief['period_end'], $brief['duration'],
+            ]);
             $proposalId = (int) $this->db->lastInsertId();
             $partner = $this->db->prepare("INSERT INTO proposal_partners (proposal_id, partner_user_id, relationship, invitation_status) VALUES (?, ?, 'primary', 'accepted')");
             $partner->execute([$proposalId, $user['id']]);
@@ -771,6 +824,10 @@ final class ApiController
         if ($proposal['status'] !== 'draft') {
             throw new RuntimeException('Only draft proposals can be edited.', 409);
         }
+        $classifications = $this->db->prepare('SELECT classification FROM proposal_classifications WHERE proposal_id = ? ORDER BY classification');
+        $classifications->execute([$proposalId]);
+        $categories = $this->db->prepare('SELECT category_id FROM proposal_categories WHERE proposal_id = ? ORDER BY category_id');
+        $categories->execute([$proposalId]);
         Http::json([
             'proposal' => [
                 'id' => (int) $proposal['id'],
@@ -779,6 +836,17 @@ final class ApiController
                 'periodStart' => $proposal['period_start'],
                 'periodEnd' => $proposal['period_end'],
                 'duration' => $proposal['stated_duration'],
+                'proponents' => $this->decodeJsonList($proposal['proponents'] ?? null),
+                'activityComponents' => $this->decodeJsonList($proposal['activity_components'] ?? null),
+                'estimatedCostItems' => $this->decodeJsonList($proposal['estimated_cost_items'] ?? null),
+                'totalEstimatedCost' => (float) ($proposal['total_estimated_cost'] ?? 0),
+                'justification' => $proposal['justification'] ?? '',
+                'targetBeneficiaries' => $proposal['target_beneficiaries'] ?? '',
+                'targetOutputs' => $proposal['target_outputs'] ?? '',
+                'possibleRisks' => $proposal['possible_risks'] ?? '',
+                'expectedPrivatePartnerships' => $proposal['expected_private_partnerships'] ?? '',
+                'classifications' => array_column($classifications->fetchAll(), 'classification'),
+                'categoryIds' => array_map('intval', array_column($categories->fetchAll(), 'category_id')),
             ],
         ]);
     }
@@ -793,39 +861,122 @@ final class ApiController
         }
 
         $data = Http::body();
-        $title = trim((string) ($data['title'] ?? ''));
-        $summary = trim((string) ($data['summary'] ?? ''));
-        if ($title === '' || $summary === '') {
-            throw new RuntimeException('Proposal title and summary are required.');
-        }
-        $start = $this->optionalDate($data['periodStart'] ?? null);
-        $end = $this->optionalDate($data['periodEnd'] ?? null);
-        if ($start !== null && $end !== null && $end < $start) {
-            throw new RuntimeException('Project end date cannot precede its start date.');
-        }
+        $brief = $this->validatedProjectBrief($data);
 
-        $statement = $this->db->prepare(
+        $this->db->beginTransaction();
+        try {
+            $statement = $this->db->prepare(
             'UPDATE proposals
-             SET title = ?, summary = ?, period_start = ?, period_end = ?, stated_duration = ?
+             SET title = ?, summary = ?, proponents = ?, activity_components = ?, estimated_cost_items = ?,
+                 total_estimated_cost = ?, justification = ?, target_beneficiaries = ?, target_outputs = ?,
+                 possible_risks = ?, expected_private_partnerships = ?, period_start = ?, period_end = ?, stated_duration = ?
              WHERE id = ? AND owner_user_id = ? AND status = ?'
-        );
-        $statement->execute([
-            $title,
-            $summary,
-            $start,
-            $end,
-            trim((string) ($data['duration'] ?? '')) ?: null,
-            $proposalId,
-            (int) $user['id'],
-            'draft',
-        ]);
-        if ($statement->rowCount() === 0) {
-            $current = $this->proposal($proposalId);
-            if ($current['status'] !== 'draft' || (int) $current['owner_user_id'] !== (int) $user['id']) {
-                throw new RuntimeException('Only your draft proposals can be edited.', 409);
+            );
+            $statement->execute([
+                $brief['title'], $brief['summary'], $brief['proponents'], $brief['activity_components'],
+                $brief['estimated_cost_items'], $brief['total_estimated_cost'], $brief['justification'],
+                $brief['target_beneficiaries'], $brief['target_outputs'], $brief['possible_risks'],
+                $brief['expected_private_partnerships'], $brief['period_start'], $brief['period_end'],
+                $brief['duration'],
+                $proposalId,
+                (int) $user['id'],
+                'draft',
+            ]);
+            if ($statement->rowCount() === 0) {
+                $current = $this->proposal($proposalId);
+                if ($current['status'] !== 'draft' || (int) $current['owner_user_id'] !== (int) $user['id']) {
+                    throw new RuntimeException('Only your draft proposals can be edited.', 409);
+                }
             }
+            $this->db->prepare('DELETE FROM proposal_classifications WHERE proposal_id = ?')->execute([$proposalId]);
+            $this->db->prepare('DELETE FROM proposal_categories WHERE proposal_id = ?')->execute([$proposalId]);
+            $this->syncProposalClassifications($proposalId, $data['classifications'] ?? []);
+            $this->syncProposalCategories($proposalId, $data['categoryIds'] ?? []);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            $this->db->rollBack();
+            throw $exception;
         }
         Http::json(['id' => $proposalId, 'status' => 'draft', 'message' => 'Draft proposal updated.']);
+    }
+
+    private function downloadProjectBrief(int $proposalId): never
+    {
+        $user = Http::user();
+        if (!in_array($user['role'], ['admin', 'partner'], true)) {
+            throw new RuntimeException('Project briefs are available to CES Admins and partner accounts.', 403);
+        }
+        $this->assertProposalAccess($proposalId, $user, false);
+        $project = $this->proposal($proposalId);
+        $owner = $this->db->prepare(
+            'SELECT CONCAT(first_name, \' \', last_name) FROM users WHERE id = ?'
+        );
+        $owner->execute([(int) $project['owner_user_id']]);
+        $preparedBy = (string) ($owner->fetchColumn() ?: 'UCC-CES Partner');
+        $escape = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        $listTable = static function (array $rows, array $columns) use ($escape): string {
+            if (!$rows) {
+                return '<p class="empty">No items provided.</p>';
+            }
+            $html = '<table><thead><tr>';
+            foreach ($columns as $label => $key) {
+                $html .= '<th>' . $escape($label) . '</th>';
+            }
+            $html .= '</tr></thead><tbody>';
+            foreach ($rows as $row) {
+                $html .= '<tr>';
+                foreach ($columns as $key) {
+                    $html .= '<td>' . nl2br($escape(is_array($row) ? ($row[$key] ?? '') : $row)) . '</td>';
+                }
+                $html .= '</tr>';
+            }
+            return $html . '</tbody></table>';
+        };
+        $proponents = $this->decodeJsonList($project['proponents'] ?? null);
+        $activities = $this->decodeJsonList($project['activity_components'] ?? null);
+        $budgetItems = $this->decodeJsonList($project['estimated_cost_items'] ?? null);
+        $dateRange = trim((string) ($project['period_start'] ?? '') . ' to ' . (string) ($project['period_end'] ?? ''), ' to');
+        $html = '<!doctype html><html><head><meta charset="utf-8"><style>
+            @page { margin: 28px 34px; }
+            body { font-family: DejaVu Sans, sans-serif; color: #24372c; font-size: 10px; line-height: 1.45; }
+            h1 { color: #176a55; font-size: 19px; margin: 0 0 4px; }
+            h2 { background: #eaf3ed; border-left: 3px solid #176a55; color: #176a55; font-size: 12px; padding: 6px 8px; margin: 15px 0 7px; }
+            p { margin: 4px 0 8px; }
+            .sub { color: #68786e; font-size: 9px; }
+            table { border-collapse: collapse; width: 100%; margin: 5px 0 9px; }
+            th, td { border: 1px solid #cad8ce; padding: 6px; text-align: left; vertical-align: top; }
+            th { background: #f2f7f3; font-size: 9px; }
+            .total { text-align: right; font-size: 12px; font-weight: bold; }
+            .empty { color: #718077; font-style: italic; }
+            </style></head><body>';
+        $html .= '<h1>UCC · Community Extension Services</h1><div class="sub">PROJECT BRIEF · Prepared by ' . $escape($preparedBy) . '</div>';
+        $html .= '<h2>1. General Project Information</h2><table><tbody>';
+        $html .= '<tr><th>Project Name</th><td>' . $escape($project['title']) . '</td></tr>';
+        $html .= '<tr><th>Brief Description</th><td>' . nl2br($escape($project['summary'])) . '</td></tr>';
+        $html .= '<tr><th>Co-Proponents / Partner Entities</th><td>' . nl2br($escape(implode("\n", $proponents))) . '</td></tr>';
+        $html .= '<tr><th>Program Term / Duration</th><td>' . $escape($dateRange ?: 'Not specified') . ' · ' . $escape($project['stated_duration'] ?? '') . '</td></tr>';
+        $html .= '</tbody></table><h2>2. Activity Components &amp; Justification</h2>';
+        $html .= $listTable($activities, ['Activity / Step' => 'activity']);
+        $html .= '<p><strong>Justification / Objectives</strong><br>' . nl2br($escape($project['justification'] ?? '')) . '</p>';
+        $html .= '<h2>3. Estimated Budget &amp; Cost Breakdown</h2>';
+        $html .= $listTable($budgetItems, ['Item Description' => 'description', 'Unit / Pax' => 'unit', 'Quantity' => 'quantity', 'Unit Cost' => 'cost', 'Subtotal' => 'subtotal']);
+        $html .= '<p class="total">Total Estimated Cost: &#8369;' . number_format((float) ($project['total_estimated_cost'] ?? 0), 2) . '</p>';
+        $html .= '<h2>4. Beneficiaries, Outputs &amp; Risk Assessment</h2><table><tbody>';
+        foreach ([
+            'Target Beneficiaries & Headcount' => $project['target_beneficiaries'] ?? '',
+            'Target Outputs / Success Indicators' => $project['target_outputs'] ?? '',
+            'Possible Risks & Mitigation Plan' => $project['possible_risks'] ?? '',
+            'Expected Private / External Partner Involvement' => $project['expected_private_partnerships'] ?? '',
+        ] as $label => $value) {
+            $html .= '<tr><th>' . $escape($label) . '</th><td>' . nl2br($escape($value ?: 'Not specified')) . '</td></tr>';
+        }
+        $html .= '</tbody></table><p class="sub">Proposal status: ' . $escape(str_replace('_', ' ', $project['status'])) . '</p></body></html>';
+        $pdf = new \Dompdf\Dompdf(new \Dompdf\Options(['isRemoteEnabled' => false]));
+        $pdf->loadHtml($html, 'UTF-8');
+        $pdf->setPaper('A4', 'portrait');
+        $pdf->render();
+        $pdf->stream('UCC-CES-Project-Brief-' . $proposalId . '.pdf', ['Attachment' => true]);
+        exit;
     }
 
     private function uploadProposalDocument(int $proposalId): never
@@ -838,24 +989,63 @@ final class ApiController
         if (!in_array($type, $allowed, true)) {
             throw new RuntimeException('Choose a valid document type.');
         }
-        $path = $this->storeUpload('file', 'documents', true);
-        $file = $_FILES['file'];
-        $mimeByExtension = ['pdf' => 'application/pdf', 'jpg' => 'image/jpeg', 'png' => 'image/png'];
-        $mime = $mimeByExtension[strtolower(pathinfo($path, PATHINFO_EXTENSION))] ?? '';
-        if ($mime === '') {
-            throw new RuntimeException('Uploaded file type could not be determined.', 500);
+        $file = $_FILES['file'] ?? null;
+        if (!$file || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('Choose a file to upload.');
+        }
+        if ((int) $file['size'] < 1 || (int) $file['size'] > (int) $this->config['max_upload_bytes']) {
+            throw new RuntimeException('File must be between 1 byte and 10 MB.');
+        }
+        $extension = strtolower(pathinfo((string) $file['name'], PATHINFO_EXTENSION));
+        $mime = (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        $docxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        $validDocumentType = match ($extension) {
+            'pdf' => $mime === 'application/pdf',
+            'jpg', 'jpeg' => $mime === 'image/jpeg',
+            'png' => $mime === 'image/png',
+            'docx' => in_array($mime, [$docxMime, 'application/zip', 'application/x-zip'], true),
+            default => false,
+        };
+        if (!$validDocumentType) {
+            throw new RuntimeException('Choose a matching PDF, DOCX, PNG, or JPG file.');
+        }
+        $descriptionValue = $data['description'] ?? '';
+        if (!is_string($descriptionValue)) {
+            throw new RuntimeException('Document description must be text.');
+        }
+        $description = trim($descriptionValue);
+        if (mb_strlen($description, 'UTF-8') > 500) {
+            throw new RuntimeException('Document description cannot exceed 500 characters.');
+        }
+        $path = $this->storeUpload('file', 'documents', true, [
+            'application/pdf',
+            'image/jpeg',
+            'image/png',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/zip',
+            'application/x-zip',
+        ]);
+        if ($extension === 'docx') {
+            $mime = $docxMime;
         }
         $signed = filter_var($data['isSigned'] ?? false, FILTER_VALIDATE_BOOLEAN);
         $originalName = preg_replace('/[\x00-\x1F\x7F]/', '_', basename((string) $file['name']));
         $originalName = mb_substr($originalName ?? 'document', 0, 255, 'UTF-8');
         $statement = $this->db->prepare(
-            'INSERT INTO documents (proposal_id, uploaded_by, document_type, relative_path, original_name, mime_type, file_size, is_signed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO documents (proposal_id, uploaded_by, document_type, relative_path, original_name, mime_type, file_size, description, is_signed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $statement->execute([
-            $proposalId, $user['id'], $type, $path,
-            $originalName, $mime, (int) $file['size'], $signed ? 1 : 0,
-        ]);
-        Http::json(['id' => (int) $this->db->lastInsertId(), 'message' => 'Document uploaded.'], 201);
+        try {
+            $statement->execute([
+                $proposalId, $user['id'], $type, $path,
+                $originalName, $mime, (int) $file['size'], $description ?: null, $signed ? 1 : 0,
+            ]);
+        } catch (Throwable $exception) {
+            $this->removeStoredUpload($path);
+            throw $exception;
+        }
+        $count = $this->db->prepare('SELECT COUNT(*) FROM documents WHERE proposal_id = ?');
+        $count->execute([$proposalId]);
+        Http::json(['id' => (int) $this->db->lastInsertId(), 'proposalId' => $proposalId, 'attachmentCount' => (int) $count->fetchColumn(), 'message' => 'Document uploaded.'], 201);
     }
 
     private function downloadDocument(int $documentId): never
@@ -1091,6 +1281,19 @@ final class ApiController
         if ($statement->rowCount() !== 1) {
             throw new RuntimeException('A pending invitation was not found.', 404);
         }
+        if ($response === 'accepted') {
+            $associate = $this->db->prepare(
+                "INSERT IGNORE INTO event_partners (event_id, partner_user_id, relationship)
+                 SELECT e.id, ?, 'collaborator' FROM events e WHERE e.proposal_id = ?"
+            );
+            $associate->execute([(int) $user['id'], $proposalId]);
+        } else {
+            $remove = $this->db->prepare(
+                "DELETE ep FROM event_partners ep JOIN events e ON e.id = ep.event_id
+                 WHERE e.proposal_id = ? AND ep.partner_user_id = ? AND ep.relationship = 'collaborator'"
+            );
+            $remove->execute([$proposalId, (int) $user['id']]);
+        }
         $proposal = $this->proposal($proposalId);
         $this->notifyUser((int) $proposal['owner_user_id'], 'Collaboration ' . $response, 'A partner has ' . $response . ' the invitation for ' . $proposal['title'] . '.');
         $this->notifyAdmins('Collaboration ' . $response, 'A partner has ' . $response . ' a collaboration invitation.');
@@ -1140,6 +1343,16 @@ final class ApiController
                 $capacity, $openAt, $closeAt,
             ]);
             $eventId = (int) $this->db->lastInsertId();
+            $organizerLink = $this->db->prepare(
+                "INSERT INTO event_partners (event_id, partner_user_id, relationship) VALUES (?, ?, 'organizer')"
+            );
+            $organizerLink->execute([$eventId, (int) $user['id']]);
+            $collaboratorLinks = $this->db->prepare(
+                "INSERT IGNORE INTO event_partners (event_id, partner_user_id, relationship)
+                 SELECT ?, partner_user_id, 'collaborator' FROM proposal_partners
+                 WHERE proposal_id = ? AND invitation_status = 'accepted' AND partner_user_id <> ?"
+            );
+            $collaboratorLinks->execute([$eventId, $proposalId, (int) $user['id']]);
             $dateInsert = $this->db->prepare('INSERT INTO event_dates (event_id, event_date, qr_token_hash) VALUES (?, ?, ?)');
             $activityInsert = $this->db->prepare('INSERT INTO activities (event_date_id, title, start_time, end_time, venue, target_participants, activity_lead) VALUES (?, ?, ?, ?, ?, ?, ?)');
             foreach ($dates as $dateData) {
@@ -1189,7 +1402,9 @@ final class ApiController
         if ($user['role'] === 'volunteer') {
             $sql .= " WHERE p.status = 'active'";
         } elseif ($user['role'] === 'partner') {
-            $sql .= ' WHERE e.organizer_user_id = ?';
+            $sql .= ' WHERE (EXISTS (SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?)
+                      OR e.organizer_user_id = ?)';
+            $params[] = (int) $user['id'];
             $params[] = (int) $user['id'];
         }
         $sql .= ' ORDER BY next_event_date, e.created_at DESC LIMIT 250';
@@ -1198,24 +1413,172 @@ final class ApiController
         Http::json(['events' => $statement->fetchAll()]);
     }
 
+    private function partnerCalendar(): never
+    {
+        $user = Http::requireRole('partner');
+        $month = (string) ($_GET['month'] ?? date('Y-m'));
+        if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $month)) {
+            throw new RuntimeException('Calendar month must use YYYY-MM format.');
+        }
+        $start = \DateTimeImmutable::createFromFormat('!Y-m', $month);
+        if (!$start || $start->format('Y-m') !== $month) {
+            throw new RuntimeException('Calendar month is invalid.');
+        }
+        $from = $start->format('Y-m-d');
+        $to = $start->modify('+1 month')->format('Y-m-d');
+        $partnerId = (int) $user['id'];
+        $partnerSql =
+            '(e.organizer_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep
+                WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ))';
+        $select = "SELECT e.id, e.title, p.title AS project_title, ed.event_date,
+                          MIN(a.venue) AS venue
+                   FROM events e
+                   JOIN proposals p ON p.id = e.proposal_id
+                   JOIN event_dates ed ON ed.event_id = e.id
+                   LEFT JOIN activities a ON a.event_date_id = ed.id";
+        $partnerEvents = $this->db->prepare(
+            $select . " WHERE p.status IN ('approved', 'active')
+                        AND ed.event_date >= ? AND ed.event_date < ?
+                        AND $partnerSql
+                        GROUP BY e.id, e.title, p.title, ed.id, ed.event_date
+                        ORDER BY ed.event_date, e.title"
+        );
+        $partnerEvents->execute([$from, $to, $partnerId, $partnerId]);
+
+        $publicEvents = $this->db->prepare(
+            $select . " WHERE p.status = 'active'
+                        AND ed.event_date >= ? AND ed.event_date < ?
+                        AND NOT $partnerSql
+                        GROUP BY e.id, e.title, p.title, ed.id, ed.event_date
+                        ORDER BY ed.event_date, e.title"
+        );
+        $publicEvents->execute([$from, $to, $partnerId, $partnerId]);
+        Http::json([
+            'month' => $month,
+            'partnerEvents' => $partnerEvents->fetchAll(),
+            'publicEvents' => $publicEvents->fetchAll(),
+        ]);
+    }
+
+    private function exportEventAttendance(int $eventId): never
+    {
+        $user = Http::requireRole('partner');
+        $this->assertEventOrganizer($eventId, $user);
+        $attendance = $this->db->prepare(
+            "SELECT e.title AS event_title, ed.event_date,
+                    u.first_name, u.last_name, u.email,
+                    ea.status AS application_status, a.status AS attendance_status,
+                    a.scanned_at, a.note
+             FROM events e
+             JOIN event_dates ed ON ed.event_id = e.id
+             LEFT JOIN event_applications ea ON ea.event_id = e.id
+             LEFT JOIN users u ON u.id = ea.volunteer_user_id
+             LEFT JOIN attendance a ON a.application_id = ea.id AND a.event_date_id = ed.id
+             WHERE e.id = ?
+             ORDER BY ed.event_date, u.last_name, u.first_name"
+        );
+        $attendance->execute([$eventId]);
+        $rows = $attendance->fetchAll();
+        if (!$rows) {
+            throw new RuntimeException('Event attendance records were not found.', 404);
+        }
+        $participants = $this->db->prepare(
+            'SELECT e.title AS event_title, ed.event_date, pc.participant_group, pc.participant_count
+             FROM events e
+             JOIN event_dates ed ON ed.event_id = e.id
+             JOIN participant_counts pc ON pc.event_date_id = ed.id
+             WHERE e.id = ?
+             ORDER BY ed.event_date, pc.participant_group, pc.created_at'
+        );
+        $participants->execute([$eventId]);
+
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="ucc-ces-event-' . $eventId . '-attendance.csv"');
+        header('X-Content-Type-Options: nosniff');
+        $output = fopen('php://output', 'wb');
+        if ($output === false) {
+            throw new RuntimeException('Unable to create the attendance export.', 500);
+        }
+        fwrite($output, "\xEF\xBB\xBF");
+        fputcsv($output, [
+            'Record type', 'Event', 'Event date', 'Attendee name', 'Email',
+            'Application status', 'Attendance status', 'Scanned at', 'Note',
+            'Participant group', 'Participant count',
+        ]);
+        foreach ($rows as $row) {
+            fputcsv($output, array_map([$this, 'safeCsvCell'], [
+                'Volunteer attendance',
+                $row['event_title'],
+                $row['event_date'],
+                trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '')),
+                $row['email'] ?? '',
+                $row['application_status'] ?? '',
+                $row['attendance_status'] ?? '',
+                $row['scanned_at'] ?? '',
+                $row['note'] ?? '',
+                '',
+                '',
+            ]));
+        }
+        foreach ($participants->fetchAll() as $row) {
+            fputcsv($output, array_map([$this, 'safeCsvCell'], [
+                'Community participant count',
+                $row['event_title'],
+                $row['event_date'],
+                '',
+                '',
+                '',
+                '',
+                '',
+                '',
+                $row['participant_group'],
+                $row['participant_count'],
+            ]));
+        }
+        fclose($output);
+        exit;
+    }
+
     private function eventDates(int $eventId): never
     {
         $user = Http::user();
-        $statement = $this->db->prepare(
-            'SELECT e.organizer_user_id, ed.id, ed.event_date
-             FROM events e JOIN event_dates ed ON ed.event_id = e.id WHERE e.id = ? ORDER BY ed.event_date'
-        );
-        $statement->execute([$eventId]);
+        $sql =
+            'SELECT e.organizer_user_id, p.status AS proposal_status, ed.id, ed.event_date
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE e.id = ?';
+        $params = [$eventId];
+        if ($user['role'] === 'partner') {
+            $sql .= ' AND (e.organizer_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep
+                WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ))';
+            array_push($params, (int) $user['id'], (int) $user['id']);
+        } elseif ($user['role'] === 'volunteer') {
+            $sql .= " AND p.status = 'active'";
+        }
+        $statement = $this->db->prepare($sql . ' ORDER BY ed.event_date');
+        $statement->execute($params);
         $dates = $statement->fetchAll();
         if (!$dates) {
             throw new RuntimeException('Event dates were not found.', 404);
         }
-        if ($user['role'] !== 'admin' && $user['role'] !== 'volunteer' && (int) $dates[0]['organizer_user_id'] !== (int) $user['id']) {
-            throw new RuntimeException('Only the event organizer or CES Admin can view these dates.', 403);
+        if ($user['role'] === 'partner') {
+            $this->assertEventOrganizer($eventId, $user);
+        } elseif ($user['role'] === 'volunteer') {
+            if ($dates[0]['proposal_status'] !== 'active') {
+                throw new RuntimeException('Event dates are only available for active public events.', 403);
+            }
+        } elseif ($user['role'] !== 'admin') {
+            throw new RuntimeException('You cannot view these event dates.', 403);
         }
         foreach ($dates as &$date) {
             $date['id'] = (int) $date['id'];
             unset($date['organizer_user_id']);
+            unset($date['proposal_status']);
         }
         Http::json(['dates' => $dates]);
     }
@@ -1591,6 +1954,15 @@ final class ApiController
         }
         $where = ['p.created_at >= ?', 'p.created_at < DATE_ADD(?, INTERVAL 1 DAY)'];
         $params = [$from, $to];
+        if ($user['role'] === 'partner') {
+            $where[] = '(p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id
+                  AND pp.partner_user_id = ?
+                  AND pp.invitation_status = ?
+            ))';
+            array_push($params, (int) $user['id'], (int) $user['id'], 'accepted');
+        }
         if ($user['role'] !== 'admin') {
             $where[] = '(p.owner_user_id = ? OR EXISTS (SELECT 1 FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = ?))';
             array_push($params, $user['id'], $user['id'], 'accepted');
@@ -1679,6 +2051,7 @@ final class ApiController
     private function moduleReport(array $user, string $module, string $from, string $to): never
     {
         $projectScope = '';
+        $eventScope = '';
         $baseParams = [];
         if ($module === 'partners') {
             if ($user['role'] !== 'admin') {
@@ -1699,6 +2072,11 @@ final class ApiController
                         WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = ?
                     ))';
                 array_push($baseParams, (int) $user['id'], (int) $user['id'], 'accepted');
+                $eventScope =
+                    ' WHERE (e.organizer_user_id = ? OR EXISTS (
+                        SELECT 1 FROM event_partners ep
+                        WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+                    ))';
             }
             $category = "(SELECT GROUP_CONCAT(c.name ORDER BY c.name SEPARATOR ', ')
                          FROM proposal_categories pc JOIN categories c ON c.id = pc.category_id
@@ -1711,7 +2089,7 @@ final class ApiController
                             $category AS category
                      FROM events e JOIN proposals p ON p.id = e.proposal_id
                      LEFT JOIN event_dates ed ON ed.event_id = e.id" .
-                    ($scope ? str_replace(' WHERE ', ' WHERE ', $scope) : '') .
+                    $eventScope .
                     ' GROUP BY e.id, e.proposal_id, e.title, p.id, p.owner_user_id, p.title, p.status, e.created_at, e.capacity, e.organizer_user_id',
                 'applications' =>
                     "SELECT ea.id, e.title AS subject, p.title AS context, ea.status, ea.applied_at AS report_date,
@@ -1720,7 +2098,7 @@ final class ApiController
                      FROM event_applications ea
                      JOIN events e ON e.id = ea.event_id
                      JOIN proposals p ON p.id = e.proposal_id
-                     JOIN users u ON u.id = ea.volunteer_user_id" . $scope,
+                     JOIN users u ON u.id = ea.volunteer_user_id" . $eventScope,
                 'attendance' =>
                     "SELECT a.id, e.title AS subject, p.title AS context, a.status,
                             COALESCE(a.scanned_at, CONCAT(ed.event_date, ' 00:00:00')) AS report_date,
@@ -1731,7 +2109,7 @@ final class ApiController
                      JOIN users u ON u.id = ea.volunteer_user_id
                      JOIN event_dates ed ON ed.id = a.event_date_id
                      JOIN events e ON e.id = ed.event_id
-                     JOIN proposals p ON p.id = e.proposal_id" . $scope,
+                     JOIN proposals p ON p.id = e.proposal_id" . $eventScope,
                 'participants' =>
                     "SELECT pc.id, e.title AS subject, p.title AS context, 'recorded' AS status,
                             pc.created_at AS report_date,
@@ -1740,7 +2118,7 @@ final class ApiController
                      FROM participant_counts pc
                      JOIN event_dates ed ON ed.id = pc.event_date_id
                      JOIN events e ON e.id = ed.event_id
-                     JOIN proposals p ON p.id = e.proposal_id" . $scope,
+                     JOIN proposals p ON p.id = e.proposal_id" . $eventScope,
                 'evaluations' =>
                     "SELECT ev.id, p.title AS subject, 'Project evaluation' AS context, 'completed' AS status,
                             ev.created_at AS report_date, CONCAT('Rating ', ev.rating, '/5: ', LEFT(COALESCE(ev.feedback, ''), 600)) AS details,
@@ -1753,13 +2131,18 @@ final class ApiController
                      FROM certificates c
                      JOIN events e ON e.id = c.event_id
                      JOIN proposals p ON p.id = e.proposal_id
-                     JOIN users u ON u.id = c.volunteer_user_id" . $scope,
+                     JOIN users u ON u.id = c.volunteer_user_id" . $eventScope,
                 'documents' =>
                     "SELECT d.id, p.title AS subject, d.document_type AS context,
                             IF(d.is_signed = 1, 'signed', 'unsigned') AS status, d.created_at AS report_date,
                             d.original_name AS details, p.owner_user_id AS partner_id, $category AS category
                      FROM documents d JOIN proposals p ON p.id = d.proposal_id" . $scope,
             ];
+            if ($user['role'] !== 'admin' && in_array($module, [
+                'events', 'applications', 'attendance', 'participants', 'certificates',
+            ], true)) {
+                $baseParams = [(int) $user['id'], (int) $user['id']];
+            }
             if (!isset($queries[$module])) {
                 throw new RuntimeException('Choose a valid report module.');
             }
@@ -1864,6 +2247,16 @@ final class ApiController
         }
         $this->assertProposalAccess($proposalId, $user, false);
         $project = $this->proposal($proposalId);
+        $eventAccess = '';
+        $eventParams = [$proposalId];
+        if ($user['role'] === 'partner') {
+            $eventAccess =
+                ' AND (e.organizer_user_id = ? OR EXISTS (
+                    SELECT 1 FROM event_partners ep
+                    WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+                ))';
+            array_push($eventParams, (int) $user['id'], (int) $user['id']);
+        }
 
         $partners = $this->db->prepare(
             "SELECT p.organization_name, p.organization_type, pp.relationship
@@ -1878,9 +2271,9 @@ final class ApiController
                     a.end_time, a.venue, a.target_participants, a.activity_lead
              FROM events e JOIN event_dates ed ON ed.event_id = e.id
              JOIN activities a ON a.event_date_id = ed.id
-             WHERE e.proposal_id = ? ORDER BY ed.event_date, a.start_time'
+             WHERE e.proposal_id = ?' . $eventAccess . ' ORDER BY ed.event_date, a.start_time'
         );
-        $schedules->execute([$proposalId]);
+        $schedules->execute($eventParams);
 
         $attendance = $this->db->prepare(
             "SELECT e.title AS event_title, ed.event_date,
@@ -1891,29 +2284,31 @@ final class ApiController
              FROM events e JOIN event_dates ed ON ed.event_id = e.id
              LEFT JOIN event_applications ea ON ea.event_id = e.id
              LEFT JOIN attendance at ON at.application_id = ea.id AND at.event_date_id = ed.id
-             WHERE e.proposal_id = ? GROUP BY e.id, ed.id ORDER BY ed.event_date"
+             WHERE e.proposal_id = ?' . $eventAccess . ' GROUP BY e.id, ed.id ORDER BY ed.event_date"
         );
-        $attendance->execute([$proposalId]);
+        $attendance->execute($eventParams);
 
         $volunteers = $this->db->prepare(
-            'SELECT e.title AS event_title, u.first_name, u.last_name, vp.volunteer_type, ea.status AS application_status
+            'SELECT e.title AS event_title, u.first_name, u.last_name,
+                    COALESCE(vp.registration_classification, vp.volunteer_type) AS volunteer_type,
+                    ea.status AS application_status
              FROM events e JOIN event_applications ea ON ea.event_id = e.id
              JOIN users u ON u.id = ea.volunteer_user_id
              JOIN volunteer_profiles vp ON vp.user_id = u.id
-             WHERE e.proposal_id = ? ORDER BY e.title, u.last_name, u.first_name'
+             WHERE e.proposal_id = ?' . $eventAccess . ' ORDER BY e.title, u.last_name, u.first_name'
         );
-        $volunteers->execute([$proposalId]);
+        $volunteers->execute($eventParams);
 
         $participants = $this->db->prepare(
             'SELECT e.title AS event_title, ed.event_date, pc.participant_group, SUM(pc.participant_count) AS participant_count
              FROM participant_counts pc JOIN event_dates ed ON ed.id = pc.event_date_id
              JOIN events e ON e.id = ed.event_id
-             WHERE e.proposal_id = ? GROUP BY ed.id, pc.participant_group ORDER BY ed.event_date, pc.participant_group'
+            WHERE e.proposal_id = ?' . $eventAccess . ' GROUP BY ed.id, pc.participant_group ORDER BY ed.event_date, pc.participant_group'
         );
-        $participants->execute([$proposalId]);
+        $participants->execute($eventParams);
 
         $documents = $this->db->prepare(
-            'SELECT id, document_type, original_name, is_signed, created_at FROM documents
+            'SELECT id, document_type, original_name, description, is_signed, created_at FROM documents
              WHERE proposal_id = ? ORDER BY created_at'
         );
         $documents->execute([$proposalId]);
@@ -1933,6 +2328,15 @@ final class ApiController
                 'periodStart' => $project['period_start'],
                 'periodEnd' => $project['period_end'],
                 'duration' => $project['stated_duration'],
+                'proponents' => $this->decodeJsonList($project['proponents'] ?? null),
+                'activityComponents' => $this->decodeJsonList($project['activity_components'] ?? null),
+                'estimatedCostItems' => $this->decodeJsonList($project['estimated_cost_items'] ?? null),
+                'totalEstimatedCost' => (float) ($project['total_estimated_cost'] ?? 0),
+                'justification' => $project['justification'] ?? '',
+                'targetBeneficiaries' => $project['target_beneficiaries'] ?? '',
+                'targetOutputs' => $project['target_outputs'] ?? '',
+                'possibleRisks' => $project['possible_risks'] ?? '',
+                'expectedPrivatePartnerships' => $project['expected_private_partnerships'] ?? '',
             ],
             'partners' => $partners->fetchAll(),
             'schedules' => $schedules->fetchAll(),
@@ -2015,6 +2419,110 @@ final class ApiController
         }
     }
 
+    private function validatedProjectBrief(array $data): array
+    {
+        $text = static function (mixed $value, string $label, int $maxLength, bool $required = true): ?string {
+            if (!is_string($value)) {
+                throw new RuntimeException($label . ' must be text.');
+            }
+            $value = trim($value);
+            if (($required && $value === '') || mb_strlen($value, 'UTF-8') > $maxLength) {
+                throw new RuntimeException($label . ($value === '' ? ' is required.' : ' is too long.'));
+            }
+            return $value === '' ? null : $value;
+        };
+        $stringList = static function (mixed $values, string $label, int $maxCount, int $maxLength) use ($text): array {
+            if (!is_array($values) || count($values) < 1 || count($values) > $maxCount) {
+                throw new RuntimeException('Add at least one ' . strtolower($label) . ' (maximum ' . $maxCount . ').');
+            }
+            $items = [];
+            foreach ($values as $value) {
+                $item = $text($value, $label, $maxLength);
+                $items[] = $item;
+            }
+            return $items;
+        };
+
+        $title = $text($data['title'] ?? null, 'Project name', 190);
+        $summary = $text($data['summary'] ?? null, 'Brief description', 10000);
+        $proponents = $stringList($data['proponents'] ?? null, 'Proponent', 30, 190);
+        $start = $this->requiredDate($data['periodStart'] ?? null);
+        $end = $this->requiredDate($data['periodEnd'] ?? null);
+        if ($end < $start) {
+            throw new RuntimeException('Project end date cannot precede its start date.');
+        }
+        $activities = $stringList($data['activityComponents'] ?? null, 'Activity component', 50, 1000);
+        $justification = $text($data['justification'] ?? null, 'Justification / objectives', 20000);
+        $beneficiaries = $text($data['targetBeneficiaries'] ?? null, 'Target beneficiaries and headcount', 10000);
+        $outputs = $text($data['targetOutputs'] ?? null, 'Target outputs / success indicators', 10000);
+        $risks = $text($data['possibleRisks'] ?? null, 'Possible risks and mitigation plan', 10000);
+        $externalPartners = $text($data['expectedPrivatePartnerships'] ?? '', 'Expected private / external partnerships', 10000, false);
+        $duration = $text($data['duration'] ?? '', 'Program duration', 100, false);
+        $budgetInput = $data['estimatedCostItems'] ?? null;
+        if (!is_array($budgetInput) || count($budgetInput) < 1 || count($budgetInput) > 100) {
+            throw new RuntimeException('Add at least one budget item (maximum 100).');
+        }
+        $budgetItems = [];
+        $totalCents = 0;
+        $maximumAmount = 9999999999.99;
+        foreach ($budgetInput as $item) {
+            if (!is_array($item)) {
+                throw new RuntimeException('Budget item details are invalid.');
+            }
+            $description = $text($item['description'] ?? null, 'Budget item description', 255);
+            $unit = $text($item['unit'] ?? null, 'Budget unit / pax details', 100);
+            $quantity = filter_var($item['quantity'] ?? null, FILTER_VALIDATE_FLOAT);
+            $cost = filter_var($item['cost'] ?? null, FILTER_VALIDATE_FLOAT);
+            if ($quantity === false || !is_finite((float) $quantity) || $quantity <= 0 || $quantity > $maximumAmount ||
+                $cost === false || !is_finite((float) $cost) || $cost < 0 || $cost > $maximumAmount) {
+                throw new RuntimeException('Each budget item needs a positive quantity and a non-negative valid cost.');
+            }
+            $unitCost = round((float) $cost, 2);
+            $lineTotal = (float) $quantity * $unitCost;
+            if (!is_finite($lineTotal) || $lineTotal > $maximumAmount) {
+                throw new RuntimeException('Each budget subtotal must be within the supported amount.');
+            }
+            $subtotalCents = (int) round($lineTotal * 100);
+            $totalCents += $subtotalCents;
+            if ($totalCents > 999999999999) {
+                throw new RuntimeException('The total estimated cost is above the supported amount.');
+            }
+            $budgetItems[] = [
+                'description' => $description,
+                'unit' => $unit,
+                'quantity' => (float) $quantity,
+                'cost' => $unitCost,
+                'subtotal' => round($subtotalCents / 100, 2),
+            ];
+        }
+        $duration = $duration ?? $start . ' to ' . $end;
+        return [
+            'title' => $title,
+            'summary' => $summary,
+            'proponents' => json_encode($proponents, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+            'activity_components' => json_encode($activities, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+            'estimated_cost_items' => json_encode($budgetItems, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+            'total_estimated_cost' => round($totalCents / 100, 2),
+            'justification' => $justification,
+            'target_beneficiaries' => $beneficiaries,
+            'target_outputs' => $outputs,
+            'possible_risks' => $risks,
+            'expected_private_partnerships' => $externalPartners,
+            'period_start' => $start,
+            'period_end' => $end,
+            'duration' => $duration,
+        ];
+    }
+
+    private function decodeJsonList(mixed $value): array
+    {
+        if (!is_string($value) || $value === '') {
+            return [];
+        }
+        $decoded = json_decode($value, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
     private function syncProposalCategories(int $proposalId, mixed $categories): void
     {
         if (!is_array($categories) || count($categories) < 1) {
@@ -2049,9 +2557,14 @@ final class ApiController
         if ($user['role'] === 'admin') {
             return;
         }
-        $statement = $this->db->prepare('SELECT organizer_user_id FROM events WHERE id = ?');
-        $statement->execute([$eventId]);
-        if ((int) $statement->fetchColumn() !== (int) $user['id']) {
+        $statement = $this->db->prepare(
+            'SELECT 1 FROM events e
+             LEFT JOIN event_partners ep ON ep.event_id = e.id AND ep.partner_user_id = ?
+             WHERE e.id = ? AND (e.organizer_user_id = ? OR ep.partner_user_id IS NOT NULL)
+             LIMIT 1'
+        );
+        $statement->execute([(int) $user['id'], $eventId, (int) $user['id']]);
+        if (!$statement->fetchColumn()) {
             throw new RuntimeException('Only the event organizer or CES Admin can manage this event.', 403);
         }
     }
@@ -2076,16 +2589,110 @@ final class ApiController
         }
     }
 
-    private function ownedProposalCounts(int $userId): array
+    private function partnerDashboard(int $userId): array
     {
-        $statement = $this->db->prepare(
-            'SELECT COUNT(DISTINCT p.id) AS proposals,
-                    SUM(p.status = ?) AS active,
-                    (SELECT COUNT(*) FROM events e JOIN proposals ep ON ep.id = e.proposal_id WHERE ep.owner_user_id = ?) AS events
-             FROM proposals p WHERE p.owner_user_id = ?'
+        $proposalScope =
+            '(p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id
+                  AND pp.partner_user_id = ?
+                  AND pp.invitation_status = \'accepted\'
+            ))';
+        $proposalStatus = array_fill_keys(
+            ['draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected'],
+            0
         );
-        $statement->execute(['active', $userId, $userId]);
-        return $statement->fetch() ?: [];
+        $proposalStatement = $this->db->prepare(
+            "SELECT p.status, COUNT(DISTINCT p.id) AS total
+             FROM proposals p
+             WHERE $proposalScope
+             GROUP BY p.status"
+        );
+        $proposalStatement->execute([$userId, $userId]);
+        foreach ($proposalStatement->fetchAll() as $row) {
+            $proposalStatus[$row['status']] = (int) $row['total'];
+        }
+
+        $eventScope =
+            '(e.organizer_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep
+                WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ))';
+        $eventCounts = $this->db->prepare(
+            "SELECT COUNT(DISTINCT e.id) AS events,
+                    COUNT(DISTINCT CASE WHEN EXISTS (
+                        SELECT 1 FROM event_dates start_date
+                        WHERE start_date.event_id = e.id AND start_date.event_date <= CURRENT_DATE
+                    ) AND EXISTS (
+                        SELECT 1 FROM event_dates future_date
+                        WHERE future_date.event_id = e.id AND future_date.event_date >= CURRENT_DATE
+                    ) THEN e.id END) AS ongoing_events,
+                    COUNT(DISTINCT CASE WHEN NOT EXISTS (
+                        SELECT 1 FROM event_dates future_date
+                        WHERE future_date.event_id = e.id AND future_date.event_date >= CURRENT_DATE
+                    ) THEN e.id END) AS completed_events,
+                    COUNT(DISTINCT CASE WHEN ea.status = 'approved' THEN ea.volunteer_user_id END) AS approved_volunteers,
+                    COUNT(DISTINCT CASE WHEN a.status = 'present'
+                        THEN CONCAT(e.id, ':', ea.volunteer_user_id) END) AS attendance_headcount
+             FROM events e
+             LEFT JOIN event_applications ea ON ea.event_id = e.id
+             LEFT JOIN attendance a ON a.application_id = ea.id
+             WHERE $eventScope"
+        );
+        $eventCounts->execute([$userId, $userId]);
+        $counts = $eventCounts->fetch() ?: [];
+        foreach ($counts as $key => $value) {
+            $counts[$key] = (int) $value;
+        }
+        $communityHeadcount = $this->db->prepare(
+            'SELECT COALESCE(SUM(pc.participant_count), 0)
+             FROM participant_counts pc
+             JOIN event_dates ed ON ed.id = pc.event_date_id
+             JOIN events e ON e.id = ed.event_id
+             WHERE ' . $eventScope
+        );
+        $communityHeadcount->execute([$userId, $userId]);
+        $counts['attendance_headcount'] += (int) $communityHeadcount->fetchColumn();
+        $counts['proposals'] = array_sum($proposalStatus);
+        $counts['active'] = $proposalStatus['active'];
+        $counts['pending_proposals'] = $proposalStatus['submitted'] + $proposalStatus['under_review'];
+        $scheduledProjects = $this->db->prepare(
+            "SELECT COUNT(DISTINCT p.id)
+             FROM proposals p
+             JOIN events e ON e.proposal_id = p.id
+             WHERE p.status IN ('approved', 'active')
+               AND $eventScope
+               AND EXISTS (
+                   SELECT 1 FROM event_dates ed
+                   WHERE ed.event_id = e.id AND ed.event_date >= CURRENT_DATE
+               )"
+        );
+        $scheduledProjects->execute([$userId, $userId]);
+        $counts['scheduled_projects'] = (int) $scheduledProjects->fetchColumn();
+
+        $upcoming = $this->db->prepare(
+            "SELECT e.id, e.title, p.title AS project_title,
+                    MIN(ed.event_date) AS event_date,
+                    (SELECT COUNT(*) FROM event_applications ea
+                     WHERE ea.event_id = e.id AND ea.status = 'approved') AS approved_applications,
+                    e.capacity
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE p.status IN ('approved', 'active')
+               AND ed.event_date >= CURRENT_DATE
+               AND $eventScope
+             GROUP BY e.id, e.title, p.title, e.capacity
+             ORDER BY event_date, e.title
+             LIMIT 6"
+        );
+        $upcoming->execute([$userId, $userId]);
+
+        return [
+            'counts' => $counts,
+            'proposalStatus' => $proposalStatus,
+            'upcomingEvents' => $upcoming->fetchAll(),
+        ];
     }
 
     private function findUserByEmail(string $email): array|false
@@ -2162,9 +2769,10 @@ final class ApiController
     private function notifyEventOrganizers(int $eventId, string $subject, string $message): void
     {
         $statement = $this->db->prepare(
-            'SELECT DISTINCT organizer_user_id FROM events WHERE id = ?'
+            'SELECT partner_user_id FROM event_partners WHERE event_id = ?
+             UNION SELECT organizer_user_id FROM events WHERE id = ?'
         );
-        $statement->execute([$eventId]);
+        $statement->execute([$eventId, $eventId]);
         foreach ($statement->fetchAll(PDO::FETCH_COLUMN) as $organizerId) {
             $this->notifyUser((int) $organizerId, $subject, $message);
         }
@@ -2187,7 +2795,7 @@ final class ApiController
         return Http::body();
     }
 
-    private function storeUpload(string $field, string $folder, bool $required): string
+    private function storeUpload(string $field, string $folder, bool $required, ?array $allowedMimes = null): string
     {
         $file = $_FILES[$field] ?? null;
         if (!$file || ($file['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
@@ -2203,10 +2811,21 @@ final class ApiController
             throw new RuntimeException('File must be between 1 byte and 10 MB.');
         }
         $mime = (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
-        if (!in_array($mime, $this->config['allowed_upload_mimes'], true)) {
-            throw new RuntimeException('Only PDF, JPEG, or PNG files are allowed.');
+        $allowedMimes ??= $this->config['allowed_upload_mimes'];
+        if (!in_array($mime, $allowedMimes, true)) {
+            throw new RuntimeException('Only PDF, DOCX, JPEG, or PNG files are allowed.');
         }
-        $extension = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'][$mime];
+        $extension = [
+            'application/pdf' => 'pdf',
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+            'application/zip' => strtolower(pathinfo((string) ($file['name'] ?? ''), PATHINFO_EXTENSION)) === 'docx' ? 'docx' : '',
+            'application/x-zip' => strtolower(pathinfo((string) ($file['name'] ?? ''), PATHINFO_EXTENSION)) === 'docx' ? 'docx' : '',
+        ][$mime];
+        if ($extension === '') {
+            throw new RuntimeException('Only PDF, DOCX, JPEG, or PNG files are allowed.');
+        }
         $directory = $this->config['uploads_path'] . DIRECTORY_SEPARATOR . $folder;
         if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) {
             throw new RuntimeException('Upload storage could not be prepared.', 500);
@@ -2216,6 +2835,21 @@ final class ApiController
             throw new RuntimeException('File could not be stored.', 500);
         }
         return 'uploads/' . $folder . '/' . $filename;
+    }
+
+    private function removeStoredUpload(string $relativePath): void
+    {
+        $root = realpath($this->config['uploads_path']);
+        $relativePath = preg_replace('#^uploads/#', '', $relativePath);
+        $file = $root === false
+            ? false
+            : realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if ($root !== false && $file !== false &&
+            str_starts_with(strtolower($file), strtolower($root . DIRECTORY_SEPARATOR)) && is_file($file)) {
+            if (!unlink($file)) {
+                error_log('Unable to remove an uploaded verification file after registration rollback.');
+            }
+        }
     }
 
     private function optionalDate(mixed $value): ?string

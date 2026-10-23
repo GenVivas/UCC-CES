@@ -69,54 +69,67 @@
                     <button class="button button-primary" type="submit">Sign in <span aria-hidden="true">→</span></button>
                     <p class="auth-card-footnote"><span class="security-icon" aria-hidden="true">✓</span> Secure access for UCC partners and volunteers</p>
                 </form>
-                <form id="register-form" class="form-stack" hidden>
-                    <div class="form-grid">
-                        <label>First name<input name="firstName" autocomplete="given-name" required></label>
-                        <label>Last name<input name="lastName" autocomplete="family-name" required></label>
+                <form id="register-form" class="form-stack" hidden novalidate>
+                    <div class="registration-progress" aria-live="polite">
+                        <span class="registration-step-number">STEP <strong data-step-number>1</strong> OF 2</span>
+                        <strong data-step-title>Basic account information</strong>
+                        <div class="registration-progress-track"><span></span></div>
                     </div>
-                    <label>Email address<input name="email" type="email" autocomplete="email" required></label>
-                    <label>Contact number<input name="contactNumber" type="tel" autocomplete="tel" required></label>
-                    <label>Account type
-                        <select name="role" required>
-                            <option value="partner">Partner / proposer</option>
-                            <option value="volunteer">Volunteer</option>
-                        </select>
-                    </label>
-                    <div id="partner-fields" class="form-stack">
-                        <label>Organization name<input name="organizationName"></label>
-                        <label>Organization type
-                            <select name="organizationType">
-                                <option value="LGU">LGU</option><option value="NGA">NGA</option>
-                                <option value="NGO">NGO</option><option value="Private Sector">Private Sector</option>
-                                <option value="BPO">BPO</option><option value="Church">Church</option>
-                                <option value="UCC Department">UCC Department</option><option value="College">College</option>
-                                <option value="Barangay">Barangay</option><option value="Other">Other</option>
-                            </select>
-                        </label>
-                    </div>
-                    <div id="volunteer-fields" class="form-stack" hidden>
-                        <label>Volunteer type
-                            <select name="volunteerType">
-                                <option value="student">Student</option><option value="professor">UCC Professor</option>
-                                <option value="tanod">Barangay Tanod</option><option value="civilian">Civilian</option>
-                                <option value="other">Other</option>
-                            </select>
-                        </label>
+                    <fieldset class="registration-step form-stack" data-register-step="1">
+                        <legend class="visually-hidden">Basic account information</legend>
                         <div class="form-grid">
-                            <label>Student number<input name="studentNumber" placeholder="12345678-N"></label>
-                            <label>Campus<input name="campus" list="campus-options"></label>
-                            <datalist id="campus-options"><option>Main Campus</option><option>Congressional</option><option>Bagong Silang</option><option>Camarin</option></datalist>
-                            <label>Course / program<input name="courseProgram"></label>
-                            <label>Faculty ID<input name="facultyId"></label>
-                            <label>Tanod ID<input name="tanodId"></label>
-                            <label>Assigned barangay<input name="barangay"></label>
-                            <label>Affiliation / organization<input name="affiliationName"></label>
+                            <label>First name<input name="firstName" autocomplete="given-name" maxlength="100" required></label>
+                            <label>Last name<input name="lastName" autocomplete="family-name" maxlength="100" required></label>
                         </div>
-                        <label>Supporting proof (PDF, JPG, PNG; max 10 MB)<input name="proof" type="file" accept=".pdf,.jpg,.jpeg,.png" required></label>
-                    </div>
-                    <label>Password <span class="field-hint">At least 12 characters</span><input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
-                    <button class="button button-primary" type="submit">Request an account <span aria-hidden="true">→</span></button>
-                    <p class="fine-print">New accounts require CES Admin approval before sign-in.</p>
+                        <label>Email address<input name="email" type="email" autocomplete="email" maxlength="190" required></label>
+                        <label>Contact number<input name="contactNumber" type="tel" autocomplete="tel" maxlength="40" required></label>
+                        <label>Password <span class="field-hint">At least 12 characters</span><input name="password" type="password" autocomplete="new-password" minlength="12" maxlength="200" required></label>
+                        <label>Confirm password<input name="confirmation" type="password" autocomplete="new-password" minlength="12" maxlength="200" required></label>
+                        <label>Account type
+                            <select name="role" required>
+                                <option value="partner">Partner / Proposer</option>
+                                <option value="volunteer">Volunteer</option>
+                            </select>
+                        </label>
+                        <button class="button button-primary" type="button" data-registration-next>Next: Verification Details <span aria-hidden="true">→</span></button>
+                    </fieldset>
+                    <fieldset class="registration-step form-stack" data-register-step="2" hidden disabled>
+                        <legend class="visually-hidden">Role verification details</legend>
+                        <div id="partner-fields" class="form-stack">
+                            <label>Organization / entity name<input name="organizationName" maxlength="190" placeholder="e.g., UCC Computer Studies Department"></label>
+                            <label>Organization category
+                                <select name="organizationCategory">
+                                    <option value="">Choose an organization category</option>
+                                    <option value="UCC Department / Academic Unit">UCC Department / Academic Unit</option>
+                                    <option value="Local Government Unit (LGU / Barangay)">Local Government Unit (LGU / Barangay)</option>
+                                    <option value="Government Agency (e.g., MMDA, DSWD)">Government Agency (e.g., MMDA, DSWD)</option>
+                                    <option value="NGO / Non-Profit Organization">NGO / Non-Profit Organization</option>
+                                    <option value="Private Sector / Corporate Partner">Private Sector / Corporate Partner</option>
+                                </select>
+                            </label>
+                            <label>Official designation / role<input name="officialDesignation" maxlength="190" placeholder="e.g., Department Head, Project Coordinator"></label>
+                        </div>
+                        <div id="volunteer-fields" class="form-stack" hidden>
+                            <label>Volunteer classification
+                                <select name="volunteerClassification">
+                                    <option value="">Choose a volunteer classification</option>
+                                    <option value="UCC Student / Faculty / Staff">UCC Student / Faculty / Staff</option>
+                                    <option value="External Guest / Community Resident">External Guest / Community Resident</option>
+                                    <option value="Organization / Private Sector Representative">Organization / Private Sector Representative</option>
+                                </select>
+                            </label>
+                            <label>Affiliation / school / company name<input name="affiliationName" maxlength="190" placeholder="Enter your school, company, or community affiliation"></label>
+                        </div>
+                        <label>Verification document (PDF, JPG, or PNG; max 10 MB)
+                            <span class="field-hint" data-proof-hint>Upload an official ID, endorsement letter, registration, or MOA document.</span>
+                            <input name="proof" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+                        </label>
+                        <div class="registration-actions">
+                            <button class="button button-quiet" type="button" data-registration-back>← Back</button>
+                            <button class="button button-primary" type="submit">Submit Application <span aria-hidden="true">→</span></button>
+                        </div>
+                        <p class="fine-print">New accounts require CES Admin approval before sign-in.</p>
+                    </fieldset>
                 </form>
             </div>
         </section>
@@ -125,13 +138,13 @@
             <aside class="sidebar">
                 <p class="eyebrow">WORKSPACE</p>
                 <nav id="main-nav" class="main-nav" aria-label="Main navigation">
-                    <button type="button" data-page="overview" class="nav-item is-active">Overview</button>
-                    <button type="button" data-page="proposals" class="nav-item" data-roles="admin,partner">Proposals</button>
-                    <button type="button" data-page="directory" class="nav-item">Partner directory</button>
-                    <button type="button" data-page="events" class="nav-item">Events &amp; attendance</button>
-                    <button type="button" data-page="accounts" class="nav-item admin-only" hidden>Accounts</button>
-                    <button type="button" data-page="reports" class="nav-item" data-roles="admin,partner">Reports</button>
-                    <button type="button" data-page="notifications" class="nav-item">Notifications</button>
+                    <a href="./" data-page="overview" class="nav-item is-active">Overview</a>
+                    <a href="proposals" data-page="proposals" class="nav-item" data-roles="admin,partner">Proposals</a>
+                    <a href="directory" data-page="directory" class="nav-item">Partner directory</a>
+                    <a href="events" data-page="events" class="nav-item">Events &amp; attendance</a>
+                    <a href="accounts" data-page="accounts" class="nav-item admin-only" hidden>Accounts</a>
+                    <a href="reports" data-page="reports" class="nav-item" data-roles="admin,partner">Reports</a>
+                    <a href="notifications" data-page="notifications" class="nav-item">Notifications</a>
                 </nav>
                 <div class="sidebar-foot">University of Caloocan City<br>Community Extension Services</div>
             </aside>

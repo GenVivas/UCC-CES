@@ -6,11 +6,66 @@ const pageMessage = document.querySelector('#page-message');
 const pageContent = document.querySelector('#page-content');
 const pageHeading = document.querySelector('#page-heading');
 const topActions = document.querySelector('#top-actions');
+const pageRoutes = {
+    overview: '',
+    proposals: 'proposals',
+    directory: 'directory',
+    events: 'events',
+    accounts: 'accounts',
+    reports: 'reports',
+    notifications: 'notifications'
+};
+const routeScript = document.querySelector('script[src*="app.js"]');
+const scriptBasePath = routeScript
+    ? new URL(routeScript.src, window.location.href).pathname.replace(/\/assets\/app\.js$/, '').replace(/\/public$/, '')
+    : '';
+const appBasePath = scriptBasePath.replace(/\/$/, '');
 let csrfToken = '';
 let currentUser = null;
 let currentPage = 'overview';
 let qrStream = null;
 let qrTimer = 0;
+
+function pageUrl(page) {
+    const suffix = pageRoutes[page];
+    return suffix ? `${appBasePath}/${suffix}` : `${appBasePath}/`;
+}
+
+function pageFromLocation() {
+    const legacyTab = new URLSearchParams(window.location.search).get('tab');
+    if (Object.hasOwn(pageRoutes, legacyTab)) return legacyTab;
+    let path = window.location.pathname.replace(/\/+$/, '');
+    if (appBasePath && path.startsWith(`${appBasePath}/public`)) {
+        path = path.slice(`${appBasePath}/public`.length);
+    } else if (appBasePath && path.startsWith(appBasePath)) {
+        path = path.slice(appBasePath.length);
+    }
+    const route = path.split('/').filter(Boolean)[0];
+    const page = Object.keys(pageRoutes).find(key => pageRoutes[key] === (route || ''));
+    if (page) return page;
+    return 'overview';
+}
+
+function syncNavigation(page) {
+    document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+        const active = item.dataset.page === page;
+        item.classList.toggle('is-active', active);
+        if (active) item.setAttribute('aria-current', 'page');
+        else item.removeAttribute('aria-current');
+        item.href = pageUrl(item.dataset.page);
+    });
+    document.querySelector('.brand').href = pageUrl('overview');
+}
+
+function navigateToPage(page, { replace = false } = {}) {
+    if (!Object.hasOwn(pageRoutes, page)) page = 'overview';
+    const url = pageUrl(page);
+    if (window.location.pathname !== url || window.location.search || window.location.hash) {
+        window.history[replace ? 'replaceState' : 'pushState']({ page }, '', url);
+    }
+    syncNavigation(page);
+    return renderPage(page);
+}
 
 async function request(path, options = {}) {
     const headers = new Headers(options.headers || {});
@@ -121,7 +176,7 @@ function enterApp(user) {
     document.querySelector('.app-layout').classList.remove('password-change-mode');
     document.querySelector('#password-change-view').hidden = true;
     document.querySelector('.sidebar').hidden = false;
-    renderPage('overview');
+    navigateToPage(pageFromLocation(), { replace: true });
 }
 
 function renderPasswordChange() {
@@ -204,18 +259,75 @@ document.querySelectorAll('[data-auth]').forEach(tab => {
     });
 });
 
-document.querySelector('#register-form [name="role"]').addEventListener('change', event => {
-    const isVolunteer = event.target.value === 'volunteer';
-    document.querySelector('#partner-fields').hidden = isVolunteer;
-    document.querySelector('#volunteer-fields').hidden = !isVolunteer;
-    document.querySelector('#register-form [name="proof"]').required = isVolunteer;
-});
-document.querySelector('#register-form [name="role"]').dispatchEvent(new Event('change'));
+const registrationForm = document.querySelector('#register-form');
+const registrationSteps = Array.from(registrationForm.querySelectorAll('[data-register-step]'));
+let registrationStep = 1;
 
-document.querySelector('#register-form [name="studentNumber"]').addEventListener('input', event => {
-    const campus = document.querySelector('#register-form [name="campus"]');
-    if (event.target.value.endsWith('-S')) campus.value = 'Main Campus';
-    if (event.target.value.endsWith('-N') && !campus.value) campus.value = 'Congressional / Bagong Silang / Camarin';
+function updateRegistrationRole() {
+    const isVolunteer = registrationForm.elements.role.value === 'volunteer';
+    const partnerFields = document.querySelector('#partner-fields');
+    const volunteerFields = document.querySelector('#volunteer-fields');
+    partnerFields.hidden = isVolunteer;
+    volunteerFields.hidden = !isVolunteer;
+    partnerFields.querySelectorAll('input, select').forEach(input => {
+        input.required = !isVolunteer;
+    });
+    volunteerFields.querySelectorAll('input, select').forEach(input => {
+        input.required = isVolunteer;
+    });
+    registrationForm.elements.proof.required = true;
+    document.querySelector('[data-proof-hint]').textContent = isVolunteer
+        ? 'Upload a school ID, government-issued ID, or company ID.'
+        : 'Upload an official ID, endorsement letter, registration, or MOA document.';
+}
+
+function showRegistrationStep(step) {
+    registrationStep = step;
+    registrationSteps.forEach(fieldset => {
+        const active = Number(fieldset.dataset.registerStep) === step;
+        fieldset.hidden = !active;
+        fieldset.disabled = !active;
+    });
+    registrationForm.querySelector('[data-step-number]').textContent = String(step);
+    registrationForm.querySelector('[data-step-title]').textContent = step === 1
+        ? 'Basic account information'
+        : 'Role verification details';
+    registrationForm.querySelector('.registration-progress-track span').style.width = step === 1 ? '50%' : '100%';
+}
+
+function validateRegistrationStep(fieldset) {
+    const invalidField = Array.from(fieldset.querySelectorAll('input, select, textarea'))
+        .find(field => !field.disabled && !field.checkValidity());
+    if (!invalidField) return true;
+    invalidField.reportValidity();
+    invalidField.focus();
+    return false;
+}
+
+registrationForm.elements.role.addEventListener('change', updateRegistrationRole);
+updateRegistrationRole();
+showRegistrationStep(1);
+
+registrationForm.querySelector('[data-registration-next]').addEventListener('click', () => {
+    clearMessage(authMessage);
+    const basicInfo = registrationSteps[0];
+    if (!validateRegistrationStep(basicInfo)) return;
+    if (registrationForm.elements.password.value !== registrationForm.elements.confirmation.value) {
+        showMessage(authMessage, 'Password and confirmation do not match.', 'error');
+        registrationForm.elements.confirmation.focus();
+        return;
+    }
+    showRegistrationStep(2);
+    const roleDetails = registrationForm.elements.role.value === 'volunteer'
+        ? document.querySelector('#volunteer-fields')
+        : document.querySelector('#partner-fields');
+    roleDetails.querySelector('input, select')?.focus();
+});
+
+registrationForm.querySelector('[data-registration-back]').addEventListener('click', () => {
+    clearMessage(authMessage);
+    showRegistrationStep(1);
+    registrationForm.elements.role.focus();
 });
 
 document.querySelector('#login-form').addEventListener('submit', async event => {
@@ -238,30 +350,42 @@ document.querySelector('#login-form').addEventListener('submit', async event => 
     }
 });
 
-document.querySelector('#register-form').addEventListener('submit', async event => {
+registrationForm.addEventListener('submit', async event => {
     event.preventDefault();
-    const form = event.currentTarget;
     clearMessage(authMessage);
-    setBusy(form, true);
+    if (registrationStep === 1) {
+        registrationForm.querySelector('[data-registration-next]').click();
+        return;
+    }
+    const verification = registrationSteps[1];
+    if (!validateRegistrationStep(verification)) return;
     try {
-        const values = Object.fromEntries(new FormData(form));
-        const proof = values.proof;
-        delete values.proof;
-        let result;
-        if (values.role === 'volunteer') {
-            const payload = new FormData();
-            payload.set('payload', JSON.stringify(values));
-            payload.set('proof', proof);
-            result = await request('/register', { method: 'POST', body: payload });
-        } else {
-            result = await request('/register', { method: 'POST', body: JSON.stringify(values) });
+        const proof = registrationForm.elements.proof.files[0];
+        if (!proof) {
+            registrationForm.elements.proof.reportValidity();
+            return;
         }
-        form.reset();
+        if (proof.size < 1 || proof.size > 10 * 1024 * 1024) {
+            showMessage(authMessage, 'Verification document must be between 1 byte and 10 MB.', 'error');
+            registrationForm.elements.proof.focus();
+            return;
+        }
+        const values = Object.fromEntries(Array.from(registrationForm.querySelectorAll('[name]'))
+            .filter(input => input.name !== 'proof' && input.type !== 'file')
+            .map(input => [input.name, input.value]));
+        setBusy(registrationForm, true);
+        const payload = new FormData();
+        payload.set('payload', JSON.stringify(values));
+        payload.set('proof', proof);
+        const result = await request('/register', { method: 'POST', body: payload });
+        registrationForm.reset();
+        updateRegistrationRole();
+        showRegistrationStep(1);
         showMessage(authMessage, result.message);
     } catch (error) {
         showMessage(authMessage, error.message, 'error');
     } finally {
-        setBusy(form, false);
+        setBusy(registrationForm, false);
     }
 });
 
@@ -344,10 +468,16 @@ document.addEventListener('keydown', event => {
 });
 
 document.querySelector('#main-nav').addEventListener('click', event => {
-    const target = event.target.closest('[data-page]');
+    const target = event.target.closest('a[data-page]');
     if (!target) return;
-    document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('is-active', item === target));
-    renderPage(target.dataset.page);
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigateToPage(target.dataset.page);
+});
+
+window.addEventListener('popstate', () => {
+    if (!currentUser || currentUser.mustChangePassword) return;
+    navigateToPage(pageFromLocation(), { replace: true });
 });
 
 function setHeading(title, subtitle) {
@@ -367,9 +497,13 @@ async function renderPage(page) {
     };
     if (pageRoles[page] && !pageRoles[page].includes(currentUser.role)) {
         page = 'overview';
+        if (pageFromLocation() !== page) {
+            window.history.replaceState({ page }, '', pageUrl(page));
+        }
     }
     stopQrCamera();
     currentPage = page;
+    syncNavigation(page);
     clearMessage(pageMessage);
     pageContent.replaceChildren();
     const pages = {
@@ -377,12 +511,12 @@ async function renderPage(page) {
         proposals: ['Proposals', 'Build, submit, and track community project proposals.'],
         directory: ['Partner directory', 'Find approved organizations across the community network.'],
         events: ['Events & attendance', 'Coordinate volunteer applications and event-day attendance.'],
-        accounts: ['Account approvals', 'Review partner and volunteer account requests.'],
         reports: ['Project reports', 'Explore project activity with date-bounded, non-financial reporting.'],
         notifications: ['Notifications', 'Your latest system updates.']
     };
+    pageHeading.hidden = page === 'accounts';
     const heading = pages[page] || pages.overview;
-    setHeading(heading[0], heading[1]);
+    if (page !== 'accounts') setHeading(heading[0], heading[1]);
     try {
         if (page === 'overview') await renderOverview();
         if (page === 'proposals') await renderProposals();
@@ -403,6 +537,10 @@ async function renderOverview() {
         renderAdminOverview(overview);
         return;
     }
+    if (currentUser.role === 'partner') {
+        renderPartnerOverview(overview.partnerDashboard);
+        return;
+    }
     const cards = node('div', undefined, 'cards');
     const labels = currentUser.role === 'partner'
         ? [['proposals', 'Your proposals'], ['active', 'Active projects'], ['events', 'Events']]
@@ -415,6 +553,91 @@ async function renderOverview() {
     pageContent.append(cards);
     const welcome = panel(`Welcome, ${currentUser.firstName}`, 'Choose a workspace section to continue. Account approval and event enrollment are separate: approved volunteers still apply to each event.');
     pageContent.append(welcome);
+}
+
+function renderPartnerOverview(dashboard) {
+    const { counts, proposalStatus, upcomingEvents } = dashboard;
+    const cards = node('div', undefined, 'dashboard-metrics partner-dashboard-metrics');
+    [
+        ['Your proposals', counts.proposals, `${counts.pending_proposals} awaiting review · ${counts.scheduled_projects} with scheduled events`, 'proposals'],
+        ['Ongoing events', counts.ongoing_events, `${counts.completed_events} completed`, 'events'],
+        ['Volunteer participants', counts.approved_volunteers, 'Approved across your events', 'events'],
+        ['Attendance headcount', counts.attendance_headcount, 'Volunteers recorded present', 'events']
+    ].forEach(([label, value, description, page]) => {
+        const card = node('article', undefined, 'metric-card dashboard-metric');
+        card.append(
+            node('span', label, 'dashboard-metric-label'),
+            node('strong', value),
+            node('small', description)
+        );
+        card.addEventListener('click', () => {
+            document.querySelector(`.nav-item[data-page="${page}"]`)?.click();
+        });
+        card.tabIndex = 0;
+        card.setAttribute('role', 'button');
+        card.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                card.click();
+            }
+        });
+        cards.append(card);
+    });
+    pageContent.append(cards);
+
+    const heading = node('div', undefined, 'dashboard-section-heading');
+    heading.append(node('h2', 'Your proposal pipeline'), node('p', 'Status summary for proposals you own or have accepted as a partner.'));
+    pageContent.append(heading);
+    const pipeline = panel('Proposal status');
+    pipeline.classList.add('dashboard-panel', 'partner-proposal-pipeline');
+    const total = Object.values(proposalStatus).reduce((sum, count) => sum + count, 0);
+    if (total === 0) {
+        pipeline.append(node('div', 'Your proposal status summary will appear here.', 'empty'));
+    } else {
+        const statusList = node('div', undefined, 'dashboard-status-list');
+        Object.entries(proposalStatus).forEach(([status, count]) => {
+            const row = node('div', undefined, 'dashboard-status-row');
+            const label = node('span', dashboardStatusLabel(status), 'dashboard-status-label');
+            const track = node('span', undefined, 'dashboard-status-track');
+            const bar = node('span', undefined, `dashboard-status-bar status-${status}`);
+            bar.style.width = `${(count / total) * 100}%`;
+            track.setAttribute('role', 'progressbar');
+            track.setAttribute('aria-label', `${dashboardStatusLabel(status)} proposals`);
+            track.setAttribute('aria-valuemin', '0');
+            track.setAttribute('aria-valuemax', String(total));
+            track.setAttribute('aria-valuenow', String(count));
+            track.append(bar);
+            row.append(label, track, node('strong', count));
+            statusList.append(row);
+        });
+        pipeline.append(statusList);
+    }
+    pipeline.append(dashboardLink('View proposals', 'proposals'));
+    pageContent.append(pipeline);
+
+    const eventsHeading = node('div', undefined, 'dashboard-section-heading partner-upcoming-heading');
+    eventsHeading.append(node('h2', 'Upcoming & ongoing events'), node('p', 'Scheduled activities linked to your partner account.'));
+    pageContent.append(eventsHeading);
+    const eventsPanel = panel('Your event schedule');
+    eventsPanel.classList.add('dashboard-panel');
+    if (!upcomingEvents.length) {
+        eventsPanel.append(node('div', 'No upcoming events are scheduled for your partner account.', 'empty'));
+    } else {
+        const list = node('div', undefined, 'record-list dashboard-record-list');
+        upcomingEvents.forEach(item => {
+            const record = node('article', undefined, 'record dashboard-event-record');
+            const info = node('div', undefined, 'record-main');
+            info.append(
+                node('strong', item.title),
+                node('small', `${item.project_title} · ${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })} · ${item.approved_applications}/${item.capacity} volunteers`)
+            );
+            record.append(info);
+            list.append(record);
+        });
+        eventsPanel.append(list);
+    }
+    eventsPanel.append(dashboardLink('Open events & attendance', 'events'));
+    pageContent.append(eventsPanel);
 }
 
 function dashboardLink(label, page) {
@@ -690,21 +913,9 @@ function renderAdminOverview(overview) {
 
 async function renderProposals() {
     if (currentUser.role === 'partner') {
-        const section = panel('Start a proposal', 'Create a draft, attach the required documents, then submit it for CES Admin review.');
-        const form = node('form', undefined, 'panel-form');
-        form.innerHTML = '<label>Project title<input name="title" required></label><label>Duration<input name="duration" placeholder="e.g. 1 month"></label><label>Start date<input name="periodStart" type="date"></label><label>End date<input name="periodEnd" type="date"></label><label class="wide">Project summary<textarea name="summary" rows="3" required></textarea></label><fieldset class="wide choice-group"><legend>Classification (choose at least one)</legend><label><input type="checkbox" name="classifications" value="CES"> CES</label><label><input type="checkbox" name="classifications" value="Student Development"> Student Development</label></fieldset><fieldset class="wide choice-group"><legend>CES category (choose at least one)</legend><div data-category-options>Loading categories…</div></fieldset><button class="button button-primary" type="submit">Save draft</button>';
         const { categories } = await request('/categories');
-        const categoryOptions = form.querySelector('[data-category-options]');
-        categoryOptions.replaceChildren();
-        categories.forEach(category => {
-            const label = node('label', category.name);
-            const checkbox = node('input');
-            checkbox.type = 'checkbox';
-            checkbox.name = 'categoryIds';
-            checkbox.value = category.id;
-            label.prepend(checkbox);
-            categoryOptions.append(label);
-        });
+        const section = panel('Start a proposal', 'Complete the four project-brief sections to save a draft. Attach the required documents before submitting it for CES Admin review.');
+        const form = createProposalWizard(categories);
         form.addEventListener('submit', createProposal);
         section.append(form);
         pageContent.append(section);
@@ -724,6 +935,9 @@ async function renderProposals() {
         row.dataset.search = `${proposal.title} ${proposal.first_name} ${proposal.last_name}`.toLocaleLowerCase();
         const titleCell = node('td', undefined, 'proposal-title-cell');
         titleCell.append(node('strong', proposal.title));
+        const attachmentCount = node('small', `${Number(proposal.attachment_count || 0)} document(s) attached`, 'proposal-attachment-count');
+        attachmentCount.dataset.attachmentCount = '';
+        titleCell.append(attachmentCount);
         const proposerCell = node('td', `${proposal.first_name} ${proposal.last_name}`);
         const statusLabel = {
             draft: 'Draft',
@@ -797,6 +1011,308 @@ async function renderProposals() {
     pageContent.append(section);
 }
 
+function createProposalWizard(categories, proposal = null) {
+    const form = node('form', undefined, 'panel-form proposal-wizard-form');
+    form.noValidate = true;
+    form.innerHTML = `
+        <div class="proposal-wizard-indicator" aria-live="polite">
+            <div><span data-wizard-count>1</span> of 4 · <strong data-wizard-title>General Project Information</strong></div>
+            <div class="proposal-wizard-progress"><span data-wizard-progress></span></div>
+        </div>
+        <section class="proposal-wizard-step" data-wizard-step="0">
+            <h3>1. General Project Information</h3>
+            <label>Project Name<input name="title" maxlength="190" required></label>
+            <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
+            <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Entities</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add proponent</button></div><div data-proponents-list></div></div>
+            <label>Program Start Date<input name="periodStart" type="date" required></label>
+            <label>Program End Date<input name="periodEnd" type="date" required></label>
+            <label class="wide">Program Duration / Term<input name="duration" maxlength="100" placeholder="Optional, e.g. 2-day program or 3 months"></label>
+        </section>
+        <section class="proposal-wizard-step" data-wizard-step="1" hidden>
+            <h3>2. Activity Components &amp; Justification</h3>
+            <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Activity Components / Steps</strong><button type="button" class="button button-quiet button-small" data-add-row="activities">Add activity</button></div><div data-activities-list></div></div>
+            <label class="wide">Justification / Objectives<textarea name="justification" rows="6" maxlength="20000" placeholder="Describe the need, objectives, innovation, collaboration, and problem-solving approach." required></textarea></label>
+        </section>
+        <section class="proposal-wizard-step" data-wizard-step="2" hidden>
+            <h3>3. Estimated Budget &amp; Cost Breakdown</h3>
+            <p class="wide field-hint">Enter the quantity, unit or pax details, and cost per unit. Subtotals and the total are calculated automatically.</p>
+            <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Budget Items</strong><button type="button" class="button button-quiet button-small" data-add-row="budget">Add budget item</button></div><div data-budget-list></div></div>
+            <div class="wide proposal-budget-total"><span>Total Estimated Cost</span><strong data-budget-total>₱0.00</strong></div>
+        </section>
+        <section class="proposal-wizard-step" data-wizard-step="3" hidden>
+            <h3>4. Beneficiaries, Outputs &amp; Risk Assessment</h3>
+            <label class="wide">Target Beneficiaries &amp; Headcount<textarea name="targetBeneficiaries" rows="3" maxlength="10000" placeholder="Identify beneficiary groups and estimated headcount." required></textarea></label>
+            <label class="wide">Target Outputs / Success Indicators<textarea name="targetOutputs" rows="3" maxlength="10000" placeholder="List measurable outputs or indicators of success." required></textarea></label>
+            <label class="wide">Possible Risks &amp; Mitigation Plan<textarea name="possibleRisks" rows="3" maxlength="10000" placeholder="Describe possible risks and how they will be mitigated." required></textarea></label>
+            <label class="wide">Expected Private / External Partner Involvement<textarea name="expectedPrivatePartnerships" rows="2" maxlength="10000" placeholder="Optional"></textarea></label>
+            <fieldset class="wide choice-group proposal-choice-group"><legend>Project Classification (choose at least one)</legend><div data-classification-options></div></fieldset>
+            <fieldset class="wide choice-group proposal-choice-group"><legend>CES Category (choose at least one)</legend><div data-category-options></div></fieldset>
+        </section>
+        <div class="proposal-wizard-actions">
+            <button type="button" class="button button-quiet" data-wizard-back hidden>← Back</button>
+            <button type="button" class="button button-primary" data-wizard-next>Next: Activity Components →</button>
+            <button type="submit" class="button button-primary" data-wizard-submit hidden>Save Draft</button>
+        </div>`;
+    const classificationOptions = form.querySelector('[data-classification-options]');
+    ['CES', 'Student Development'].forEach(value => {
+        const label = node('label', value);
+        const input = node('input');
+        input.type = 'checkbox';
+        input.name = 'classifications';
+        input.value = value;
+        input.checked = proposal?.classifications?.includes(value) || false;
+        label.prepend(input);
+        classificationOptions.append(label);
+    });
+    const categoryOptions = form.querySelector('[data-category-options]');
+    categories.forEach(category => {
+        const label = node('label', category.name);
+        const input = node('input');
+        input.type = 'checkbox';
+        input.name = 'categoryIds';
+        input.value = category.id;
+        input.checked = proposal?.categoryIds?.includes(Number(category.id)) || false;
+        label.prepend(input);
+        categoryOptions.append(label);
+    });
+
+    form.elements.title.value = proposal?.title || '';
+    form.elements.summary.value = proposal?.summary || '';
+    form.elements.periodStart.value = proposal?.periodStart || '';
+    form.elements.periodEnd.value = proposal?.periodEnd || '';
+    form.elements.duration.value = proposal?.duration || '';
+    form.elements.justification.value = proposal?.justification || '';
+    form.elements.targetBeneficiaries.value = proposal?.targetBeneficiaries || '';
+    form.elements.targetOutputs.value = proposal?.targetOutputs || '';
+    form.elements.possibleRisks.value = proposal?.possibleRisks || '';
+    form.elements.expectedPrivatePartnerships.value = proposal?.expectedPrivatePartnerships || '';
+    (proposal?.proponents?.length ? proposal.proponents : ['']).forEach(value => addProposalTextRow(form, 'proponents', value));
+    (proposal?.activityComponents?.length ? proposal.activityComponents : ['']).forEach(value => addProposalTextRow(form, 'activities', value));
+    (proposal?.estimatedCostItems?.length ? proposal.estimatedCostItems : [{}]).forEach(value => addProposalBudgetRow(form, value));
+
+    const titles = ['General Project Information', 'Activity Components & Justification', 'Estimated Budget & Cost Breakdown', 'Beneficiaries, Outputs & Risk Assessment'];
+    let activeStep = 0;
+    const showStep = index => {
+        activeStep = index;
+        showProposalWizardStep(form, index, titles);
+    };
+    const validateStep = index => {
+        const step = form.querySelector(`[data-wizard-step="${index}"]`);
+        const invalid = Array.from(step.querySelectorAll('input[required], textarea[required], select[required]')).find(input => !input.checkValidity());
+        if (invalid) {
+            invalid.reportValidity();
+            invalid.focus();
+            return false;
+        }
+        if (index === 0 && !form.querySelector('[data-proponents-list] input').value.trim()) {
+            form.querySelector('[data-proponents-list] input').setCustomValidity('Add at least one co-proponent or partner entity.');
+            form.querySelector('[data-proponents-list] input').reportValidity();
+            form.querySelector('[data-proponents-list] input').setCustomValidity('');
+            return false;
+        }
+        if (index === 1 && !Array.from(step.querySelectorAll('[data-activities-list] textarea')).some(input => input.value.trim())) {
+            showMessage(pageMessage, 'Add at least one activity component or step.', 'error');
+            return false;
+        }
+        if (index === 2 && !Array.from(form.querySelectorAll('[data-budget-list] input')).every(input => input.checkValidity())) {
+            const invalidBudgetInput = Array.from(form.querySelectorAll('[data-budget-list] input')).find(input => !input.checkValidity());
+            invalidBudgetInput?.reportValidity();
+            return false;
+        }
+        if (index === 3) {
+            if (!step.querySelectorAll('[name="classifications"]:checked').length || !step.querySelectorAll('[name="categoryIds"]:checked').length) {
+                showMessage(pageMessage, 'Select at least one project classification and CES category.', 'error');
+                return false;
+            }
+        }
+        clearMessage(pageMessage);
+        return true;
+    };
+    form.querySelector('[data-wizard-next]').addEventListener('click', event => {
+        event.preventDefault();
+        activeStep = Number(form.dataset.activeWizardStep || 0);
+        if (validateStep(activeStep)) showStep(Math.min(activeStep + 1, titles.length - 1));
+    });
+    form.querySelector('[data-wizard-back]').addEventListener('click', event => {
+        event.preventDefault();
+        activeStep = Number(form.dataset.activeWizardStep || 0);
+        showStep(Math.max(activeStep - 1, 0));
+    });
+    form.addEventListener('click', event => {
+        const add = event.target.closest('[data-add-row]');
+        if (add) {
+            if (add.dataset.addRow === 'proponents') addProposalTextRow(form, 'proponents');
+            if (add.dataset.addRow === 'activities') addProposalTextRow(form, 'activities');
+            if (add.dataset.addRow === 'budget') addProposalBudgetRow(form);
+            return;
+        }
+        const remove = event.target.closest('[data-remove-row]');
+        if (remove) {
+            const rows = remove.closest('[data-row-list]').querySelectorAll('[data-editor-row]');
+            if (rows.length > 1) remove.closest('[data-editor-row]').remove();
+            updateProposalBudgetTotal(form);
+        }
+    });
+    form.addEventListener('input', event => {
+        if (event.target.matches('[data-budget-cost], [data-budget-quantity]')) updateProposalBudgetTotal(form);
+        if (event.target.name === 'periodStart') form.elements.periodEnd.min = event.target.value;
+    });
+    form.elements.periodEnd.min = form.elements.periodStart.value;
+    updateProposalBudgetTotal(form);
+    showStep(0);
+    return form;
+}
+
+function showProposalWizardStep(form, index, titles = [
+    'General Project Information',
+    'Activity Components & Justification',
+    'Estimated Budget & Cost Breakdown',
+    'Beneficiaries, Outputs & Risk Assessment'
+]) {
+    form.dataset.activeWizardStep = String(index);
+    form.querySelectorAll('[data-wizard-step]').forEach((step, stepIndex) => {
+        step.hidden = stepIndex !== index;
+    });
+    form.querySelector('[data-wizard-count]').textContent = String(index + 1);
+    form.querySelector('[data-wizard-title]').textContent = titles[index];
+    form.querySelector('[data-wizard-progress]').style.width = `${((index + 1) / titles.length) * 100}%`;
+    form.querySelector('[data-wizard-back]').hidden = index === 0;
+    form.querySelector('[data-wizard-next]').hidden = index === titles.length - 1;
+    form.querySelector('[data-wizard-submit]').hidden = index !== titles.length - 1;
+    const nextLabels = [
+        'Next: Activity Components →',
+        'Next: Estimated Budget →',
+        'Next: Beneficiaries & Risks →'
+    ];
+    if (index < nextLabels.length) {
+        form.querySelector('[data-wizard-next]').textContent = nextLabels[index];
+    }
+    const activeStep = form.querySelector(`[data-wizard-step="${index}"]`);
+    activeStep.classList.remove('wizard-step-enter');
+    requestAnimationFrame(() => activeStep.classList.add('wizard-step-enter'));
+}
+
+function addProposalTextRow(form, listName, value = '') {
+    const listSelector = listName === 'proponents' ? '[data-proponents-list]' : '[data-activities-list]';
+    const row = node('div', undefined, 'proposal-editor-row');
+    row.dataset.editorRow = '';
+    const input = node(listName === 'activities' ? 'textarea' : 'input');
+    input.required = true;
+    input.value = value;
+    input.maxLength = listName === 'activities' ? 1000 : 190;
+    input.placeholder = listName === 'activities' ? 'Describe an activity or project step' : 'e.g., UCC + City Government of Caloocan';
+    input.setAttribute('aria-label', listName === 'activities' ? 'Activity component or step' : 'Co-proponent or partner entity');
+    input.dataset.wizardValue = listName;
+    if (listName === 'activities') input.rows = 2;
+    row.append(input, proposalRemoveButton());
+    const list = form.querySelector(listSelector);
+    list.dataset.rowList = '';
+    list.append(row);
+}
+
+function addProposalBudgetRow(form, item = {}) {
+    const row = node('div', undefined, 'proposal-budget-row');
+    row.dataset.editorRow = '';
+    const fields = [
+        ['description', 'Item description', 'text', item.description || '', '255'],
+        ['unit', 'Unit / pax details', 'text', item.unit || '', '100'],
+        ['quantity', 'Quantity', 'number', item.quantity ?? '', ''],
+        ['cost', 'Cost per unit (₱)', 'number', item.cost ?? '', '']
+    ];
+    fields.forEach(([key, placeholder, type, value, maxLength]) => {
+        const input = node('input');
+        input.type = type;
+        input.placeholder = placeholder;
+        input.value = value;
+        input.required = true;
+        input.setAttribute('aria-label', placeholder);
+        input.dataset.budgetField = key;
+        if (maxLength) input.maxLength = Number(maxLength);
+        if (type === 'number') {
+            input.min = key === 'quantity' ? '0.01' : '0';
+            input.step = '0.01';
+            input.dataset[key === 'cost' ? 'budgetCost' : 'budgetQuantity'] = '';
+        }
+        row.append(input);
+    });
+    const subtotal = node('small', '₱0.00', 'proposal-budget-subtotal');
+    subtotal.dataset.budgetSubtotal = '';
+    row.append(subtotal, proposalRemoveButton());
+    const list = form.querySelector('[data-budget-list]');
+    list.dataset.rowList = '';
+    list.append(row);
+}
+
+function proposalRemoveButton() {
+    const remove = node('button', 'Remove', 'button button-quiet button-small proposal-remove-row');
+    remove.type = 'button';
+    remove.dataset.removeRow = '';
+    remove.setAttribute('aria-label', 'Remove row');
+    return remove;
+}
+
+function updateProposalBudgetTotal(form) {
+    let cents = 0;
+    form.querySelectorAll('[data-editor-row]').forEach(row => {
+        if (!row.querySelector('[data-budget-cost]')) return;
+        const quantity = Number(row.querySelector('[data-budget-quantity]').value) || 0;
+        const cost = Number(row.querySelector('[data-budget-cost]').value) || 0;
+        const subtotal = Math.round(quantity * cost * 100);
+        cents += subtotal;
+        row.querySelector('[data-budget-subtotal]').textContent = `₱${(subtotal / 100).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+    });
+    form.querySelector('[data-budget-total]').textContent = `₱${(cents / 100).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+}
+
+function serializeProposalWizard(form) {
+    const formData = new FormData(form);
+    const data = Object.fromEntries(formData);
+    data.proponents = Array.from(form.querySelectorAll('[data-proponents-list] input')).map(input => input.value.trim()).filter(Boolean);
+    data.activityComponents = Array.from(form.querySelectorAll('[data-activities-list] textarea')).map(input => input.value.trim()).filter(Boolean);
+    data.estimatedCostItems = Array.from(form.querySelectorAll('[data-budget-list] [data-editor-row]')).map(row => ({
+        description: row.querySelector('[data-budget-field="description"]').value.trim(),
+        unit: row.querySelector('[data-budget-field="unit"]').value.trim(),
+        quantity: row.querySelector('[data-budget-field="quantity"]').value,
+        cost: row.querySelector('[data-budget-field="cost"]').value
+    }));
+    data.classifications = formData.getAll('classifications');
+    data.categoryIds = formData.getAll('categoryIds');
+    return data;
+}
+
+function validateCompleteProposalWizard(form) {
+    for (let index = 0; index < 4; index++) {
+        const step = form.querySelector(`[data-wizard-step="${index}"]`);
+        const invalid = Array.from(step.querySelectorAll('input[required], textarea[required]')).find(input => !input.checkValidity());
+        if (invalid) {
+            showProposalWizardStep(form, index);
+            invalid.reportValidity();
+            invalid.focus();
+            return false;
+        }
+        if (index === 0 && !Array.from(step.querySelectorAll('[data-proponents-list] input')).some(input => input.value.trim())) {
+            showProposalWizardStep(form, index);
+            const input = step.querySelector('[data-proponents-list] input');
+            input.setCustomValidity('Add at least one co-proponent or partner entity.');
+            input.reportValidity();
+            input.setCustomValidity('');
+            return false;
+        }
+        if (index === 1 && !Array.from(step.querySelectorAll('[data-activities-list] textarea')).some(input => input.value.trim())) {
+            showProposalWizardStep(form, index);
+            showMessage(pageMessage, 'Add at least one activity component or step.', 'error');
+            return false;
+        }
+        if (index === 3 && (!step.querySelectorAll('[name="classifications"]:checked').length || !step.querySelectorAll('[name="categoryIds"]:checked').length)) {
+            showProposalWizardStep(form, index);
+            showMessage(pageMessage, 'Select at least one project classification and CES category.', 'error');
+            return false;
+        }
+    }
+    clearMessage(pageMessage);
+    return true;
+}
+
 function filterProposalRows(tableBody, filters, emptyState) {
     const search = filters.querySelector('[name="search"]').value.trim().toLocaleLowerCase();
     const status = filters.querySelector('[name="status"]').value;
@@ -810,30 +1326,26 @@ function filterProposalRows(tableBody, filters, emptyState) {
 }
 
 async function editProposal(proposalId) {
-    const { proposal } = await request(`/proposals/${proposalId}/edit-data`);
-    const section = panel('Edit draft proposal', 'Update your draft before submitting it for CES Admin review.');
+    const [{ proposal }, { categories }] = await Promise.all([
+        request(`/proposals/${proposalId}/edit-data`),
+        request('/categories')
+    ]);
+    const section = panel('Edit draft proposal', 'Update the Project Brief fields. Your existing selections are preserved.');
     section.classList.add('proposal-edit-panel');
-    const form = node('form', undefined, 'panel-form');
-    form.innerHTML = '<label>Project title<input name="title" required></label><label>Duration<input name="duration" placeholder="e.g. 1 month"></label><label>Start date<input name="periodStart" type="date"></label><label>End date<input name="periodEnd" type="date"></label><label class="wide">Project summary<textarea name="summary" rows="3" required></textarea></label><div class="wide proposal-edit-actions"></div>';
-    form.elements.title.value = proposal.title;
-    form.elements.duration.value = proposal.duration || '';
-    form.elements.periodStart.value = proposal.periodStart || '';
-    form.elements.periodEnd.value = proposal.periodEnd || '';
-    form.elements.summary.value = proposal.summary;
-    const actions = form.querySelector('.proposal-edit-actions');
-    const save = node('button', 'Save changes', 'button button-primary');
-    save.type = 'submit';
+    const form = createProposalWizard(categories, proposal);
+    form.querySelector('[data-wizard-submit]').textContent = 'Save Changes';
     const cancel = node('button', 'Cancel', 'button button-quiet');
     cancel.type = 'button';
     cancel.addEventListener('click', () => section.remove());
-    actions.append(save, cancel);
+    form.querySelector('.proposal-wizard-actions').append(cancel);
     form.addEventListener('submit', async event => {
         event.preventDefault();
+        if (!validateCompleteProposalWizard(form)) return;
         setBusy(form, true);
         try {
             await request(`/proposals/${proposalId}`, {
                 method: 'PUT',
-                body: JSON.stringify(Object.fromEntries(new FormData(form)))
+                body: JSON.stringify(serializeProposalWizard(form))
             });
             section.remove();
             showMessage(pageMessage, 'Draft proposal updated.');
@@ -852,20 +1364,17 @@ async function editProposal(proposalId) {
 async function createProposal(event) {
     event.preventDefault();
     const form = event.currentTarget;
-    const formData = new FormData(form);
-    const data = Object.fromEntries(formData);
-    data.classifications = formData.getAll('classifications');
-    data.categoryIds = formData.getAll('categoryIds');
-    if (!data.classifications.length || !data.categoryIds.length) {
-        showMessage(pageMessage, 'Select at least one project classification and CES category.', 'error');
-        return;
-    }
+    if (!validateCompleteProposalWizard(form)) return;
+    const data = serializeProposalWizard(form);
+    setBusy(form, true);
     try {
         await request('/proposals', { method: 'POST', body: JSON.stringify(data) });
         await renderPage('proposals');
         showMessage(pageMessage, 'Draft saved.');
     } catch (error) {
         showMessage(pageMessage, error.message, 'error');
+    } finally {
+        setBusy(form, false);
     }
 }
 
@@ -922,11 +1431,12 @@ async function renderDirectory() {
     const list = node('div', undefined, 'record-list');
     partners.forEach(partner => {
         const record = node('article', undefined, 'record directory-record');
-        record.dataset.search = `${partner.organization_name} ${partner.organization_type} ${partner.address || ''} ${partner.sectors || ''} ${partner.subcategories || ''}`.toLocaleLowerCase();
+        record.dataset.search = `${partner.organization_name} ${partner.organization_category || partner.organization_type} ${partner.official_designation || ''} ${partner.address || ''} ${partner.sectors || ''} ${partner.subcategories || ''}`.toLocaleLowerCase();
         const info = node('div', undefined, 'record-main');
         info.append(
             node('strong', partner.organization_name),
-            node('small', `${partner.organization_type} · ${partner.email}`),
+            node('small', `${partner.organization_category || partner.organization_type} · ${partner.email}`),
+            ...(partner.official_designation ? [node('small', partner.official_designation)] : []),
             node('small', partner.address || 'Address not provided'),
             node('small', partner.subcategories || 'No sector subcategories assigned')
         );
@@ -940,12 +1450,18 @@ async function renderDirectory() {
             nameInput.required = true;
             nameInput.value = partner.organization_name;
             nameLabel.append(nameInput);
-            const typeLabel = node('label', 'Organization type');
+            const typeLabel = node('label', 'Organization category');
             const typeSelect = node('select');
-            typeSelect.name = 'organizationType';
-            ['NGA', 'LGU', 'NGO', 'Private Sector', 'BPO', 'Church', 'UCC Department', 'College', 'Barangay', 'Other']
-                .forEach(type => typeSelect.add(new Option(type, type)));
-            typeSelect.value = partner.organization_type;
+            typeSelect.name = 'organizationCategory';
+            [
+                'UCC Department / Academic Unit',
+                'Local Government Unit (LGU / Barangay)',
+                'Government Agency (e.g., MMDA, DSWD)',
+                'NGO / Non-Profit Organization',
+                'Private Sector / Corporate Partner',
+                'Other'
+            ].forEach(category => typeSelect.add(new Option(category, category)));
+            typeSelect.value = partner.organization_category || 'Other';
             typeLabel.append(typeSelect);
             const addressLabel = node('label', 'Address');
             const addressInput = node('input');
@@ -974,7 +1490,7 @@ async function renderDirectory() {
                         method: 'PUT',
                         body: JSON.stringify({
                             organizationName: nameInput.value,
-                            organizationType: typeSelect.value,
+                            organizationCategory: typeSelect.value,
                             address: addressInput.value,
                             subcategoryIds: Array.from(select.selectedOptions, option => option.value)
                         })
@@ -1071,6 +1587,9 @@ async function renderEvents() {
     const { events } = await request('/events');
     if (!events.length) {
         pageContent.append(node('div', currentUser.role === 'partner' ? 'No events have been scheduled for your projects yet.' : 'No active project events are available.', 'empty'));
+        if (currentUser.role === 'partner') {
+            await renderPartnerEventsDashboard(events);
+        }
         return;
     }
     const list = node('div', undefined, 'record-list');
@@ -1094,6 +1613,12 @@ async function renderEvents() {
             }
             actions.append(button('Event dates', `dates-${item.id}`, 'button button-quiet button-small'));
             actions.append(button('My certificates', `certificates-${item.id}`));
+        } else if (currentUser.role === 'partner') {
+            actions.append(
+                button('Attendees', `attendees-${item.id}`, 'button button-quiet button-small'),
+                button('Dates / attendance', `dates-${item.id}`, 'button button-quiet button-small'),
+                button('Export attendance', `attendexport-${item.id}`, 'button button-quiet button-small')
+            );
         } else {
             actions.append(button('Applications', `applications-${item.id}`), button('Dates / attendance', `dates-${item.id}`), button('Certificates', `certificates-${item.id}`));
         }
@@ -1101,6 +1626,179 @@ async function renderEvents() {
         list.append(record);
     }
     pageContent.append(list);
+    if (currentUser.role === 'partner') {
+        await renderPartnerEventsDashboard(events);
+    }
+}
+
+async function renderPartnerEventsDashboard(events) {
+    const calendarSection = panel('Partner calendar', 'Your approved and scheduled events plus public UCC-CES activities available for collaboration.');
+    calendarSection.classList.add('partner-calendar-panel');
+    const calendar = node('div', undefined, 'partner-calendar');
+    calendarSection.append(calendar);
+    pageContent.append(calendarSection);
+
+    const attendanceSection = panel('Attendance & attendee overview', 'Volunteer applications and community participant totals for events linked to your partner account.');
+    attendanceSection.classList.add('partner-attendance-panel');
+    if (!events.length) {
+        attendanceSection.append(node('div', 'Attendee records will appear when your organization has scheduled events.', 'empty'));
+    } else {
+        const attendeeList = node('div', undefined, 'record-list partner-attendee-event-list');
+        events.forEach(item => {
+            const record = node('article', undefined, 'record partner-attendee-event');
+            const info = node('div', undefined, 'record-main');
+            info.append(
+                node('strong', item.title),
+                node('small', `${item.project_title} · ${Number(item.approved_applications)} approved volunteers · capacity ${item.capacity}`)
+            );
+            record.append(info, button('View attendees', `attendees-${item.id}`, 'button button-quiet button-small'), button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'));
+            attendeeList.append(record);
+        });
+        attendanceSection.append(attendeeList);
+    }
+    pageContent.append(attendanceSection);
+
+    const renderCalendar = async month => {
+        calendar.replaceChildren(node('div', 'Loading calendar…', 'empty'));
+        try {
+            const data = await request(`/partner/calendar?month=${encodeURIComponent(month)}`);
+            const [year, monthNumber] = data.month.split('-').map(Number);
+            const first = new Date(year, monthNumber - 1, 1);
+            const daysInMonth = new Date(year, monthNumber, 0).getDate();
+            const offset = first.getDay();
+            const eventsByDate = new Map();
+            [...data.partnerEvents.map(event => ({ ...event, visibility: 'partner' })),
+                ...data.publicEvents.map(event => ({ ...event, visibility: 'public' }))].forEach(event => {
+                const items = eventsByDate.get(event.event_date) || [];
+                items.push(event);
+                eventsByDate.set(event.event_date, items);
+            });
+            const monthLabel = new Intl.DateTimeFormat('en-PH', { month: 'long', year: 'numeric' }).format(first);
+            const toolbar = node('div', undefined, 'partner-calendar-toolbar');
+            const previous = button('Previous month', 'calendar-previous', 'button button-quiet button-small');
+            const next = button('Next month', 'calendar-next', 'button button-quiet button-small');
+            toolbar.append(previous, node('h3', monthLabel), next);
+            const grid = node('div', undefined, 'partner-calendar-grid');
+            ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(day => {
+                grid.append(node('div', day, 'partner-calendar-weekday'));
+            });
+            for (let index = 0; index < offset; index++) {
+                grid.append(node('div', undefined, 'partner-calendar-day is-outside'));
+            }
+            for (let day = 1; day <= daysInMonth; day++) {
+                const date = `${data.month}-${String(day).padStart(2, '0')}`;
+                const cell = node('div', undefined, 'partner-calendar-day');
+                cell.append(node('span', day, 'partner-calendar-day-number'));
+                (eventsByDate.get(date) || []).forEach(event => {
+                    const eventButton = button(
+                        event.title,
+                        event.visibility === 'partner' ? `calendar-event-${event.id}` : 'calendar-public-event',
+                        `partner-calendar-event is-${event.visibility}`
+                    );
+                    eventButton.title = `${event.project_title}${event.venue ? ` · ${event.venue}` : ''}`;
+                    eventButton.dataset.eventId = event.id;
+                    eventButton.dataset.visibility = event.visibility;
+                    eventButton.dataset.date = event.event_date;
+                    cell.append(eventButton);
+                });
+                grid.append(cell);
+            }
+            while ((grid.children.length - 7) % 7 !== 0) {
+                grid.append(node('div', undefined, 'partner-calendar-day is-outside'));
+            }
+            calendar.replaceChildren(toolbar, grid);
+            previous.addEventListener('click', event => {
+                event.stopPropagation();
+                const priorMonth = new Date(year, monthNumber - 2, 1);
+                renderCalendar(`${priorMonth.getFullYear()}-${String(priorMonth.getMonth() + 1).padStart(2, '0')}`);
+            });
+            next.addEventListener('click', event => {
+                event.stopPropagation();
+                const nextMonth = new Date(year, monthNumber, 1);
+                renderCalendar(`${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, '0')}`);
+            });
+            grid.addEventListener('click', event => {
+                const target = event.target.closest('[data-action]');
+                if (!target) return;
+                event.stopPropagation();
+                if (target.dataset.visibility === 'partner') {
+                    showDates(Number(target.dataset.eventId)).catch(error => showMessage(pageMessage, error.message, 'error'));
+                } else {
+                    showMessage(pageMessage, `${target.textContent} · ${dashboardDate(target.dataset.date, { month: 'long', day: 'numeric', year: 'numeric' })} · Public UCC-CES event`);
+                }
+            });
+        } catch (error) {
+            console.error('Partner calendar could not be loaded:', error);
+            calendar.replaceChildren(node('div', error.message, 'empty'));
+        }
+    };
+    await renderCalendar(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit' }).format(new Date()));
+}
+
+async function showPartnerEventAttendees(eventId) {
+    const [{ applications }, { dates }] = await Promise.all([
+        request(`/events/${eventId}/applications`),
+        request(`/events/${eventId}/dates`)
+    ]);
+    const attendanceByApplication = new Map(applications.map(application => [Number(application.id), 0]));
+    const participantTotals = [];
+    for (const date of dates) {
+        const [{ attendance }, { participants }] = await Promise.all([
+            request(`/event-dates/${date.id}/attendance`),
+            request(`/event-dates/${date.id}/participants`)
+        ]);
+        attendance.forEach(item => {
+            if (item.attendance_status === 'present') {
+                attendanceByApplication.set(Number(item.application_id), (attendanceByApplication.get(Number(item.application_id)) || 0) + 1);
+            }
+        });
+        participants.forEach(item => participantTotals.push({ ...item, event_date: date.event_date }));
+    }
+    const section = panel('Event attendees', 'Volunteer application status, attendance records, and separately recorded community participant totals.');
+    section.classList.add('applications-panel', 'partner-attendee-details');
+    if (!applications.length) {
+        section.append(node('div', 'No volunteer applications have been submitted for this event.', 'empty'));
+    } else {
+        applications.forEach(application => {
+            const record = node('article', undefined, 'record');
+            const info = node('div', undefined, 'record-main');
+            info.append(
+                node('strong', `${application.first_name} ${application.last_name}`),
+                node('small', `${application.email} · ${attendanceByApplication.get(Number(application.id)) || 0} date(s) attended`)
+            );
+            record.append(info, node('span', application.status, `badge status-badge status-${application.status}`));
+            section.append(record);
+        });
+    }
+    const communitySection = node('section', undefined, 'partner-community-counts');
+    communitySection.append(node('h3', 'Community participant counts'));
+    if (!participantTotals.length) {
+        communitySection.append(node('p', 'No community participant counts have been recorded for this event.', 'empty'));
+    } else {
+        participantTotals.forEach(item => {
+            communitySection.append(node('p', `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })} · ${item.participant_group}: ${item.participant_count}`));
+        });
+    }
+    section.append(communitySection);
+    const existing = pageContent.querySelector('.partner-attendee-details');
+    existing?.remove();
+    pageContent.prepend(section);
+    section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function downloadPartnerAttendance(eventId) {
+    const response = await fetch(`${API}/events/${eventId}/attendance-export`, { credentials: 'same-origin' });
+    if (!response.ok) {
+        const contentType = response.headers.get('content-type') || '';
+        const result = contentType.includes('application/json') ? await response.json() : null;
+        throw new Error(result?.error || 'Attendance export failed.');
+    }
+    const blob = await response.blob();
+    const link = node('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `ucc-ces-event-${eventId}-attendance.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 function addEventDateEditor(container) {
@@ -1136,47 +1834,335 @@ function addEventActivityEditor(container) {
 
 async function renderAccounts(status = 'pending') {
     if (currentUser.role !== 'admin') return;
-    const { accounts } = await request(`/accounts${status ? `?status=${encodeURIComponent(status)}` : ''}`);
-    const section = panel('Account register', 'Review pending accounts or filter the approved, rejected, and disabled account records.');
-    const filters = node('div', undefined, 'proposal-filters account-filters');
-    filters.innerHTML = '<label>Account status<select name="status"><option value="pending">Pending approval</option><option value="">All accounts</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="disabled">Disabled</option></select></label>';
-    filters.querySelector('select').value = status;
-    filters.querySelector('select').addEventListener('change', event => renderAccounts(event.target.value));
-    const list = node('div', undefined, 'record-list');
-    accounts.forEach(account => {
-        const record = node('article', undefined, 'record');
-        const info = node('div', undefined, 'record-main');
-        info.append(
-            node('strong', `${account.first_name} ${account.last_name}`),
-            node('small', `${account.email} · ${account.role} · ${account.contact_number}`),
-            node('small', account.role === 'partner'
-                ? `${account.organization_name || 'Organization not provided'}${account.organization_type ? ` · ${account.organization_type}` : ''}`
-                : account.role === 'volunteer'
-                    ? `${account.volunteer_type || 'Volunteer'}${account.student_number ? ` · ${account.student_number}` : ''}${account.campus ? ` · ${account.campus}` : ''}`
-                    : ''),
-            node('small', `Registered ${dashboardDate(account.created_at, { month: 'short', day: 'numeric', year: 'numeric' })}`)
-        );
-        const actions = node('div', undefined, 'record-actions');
-        if (account.role === 'volunteer') {
-            const proofLink = node('a', 'View proof', 'button button-quiet button-small');
-            proofLink.href = `${API}/accounts/${account.id}/proof`;
-            proofLink.target = '_blank';
-            proofLink.rel = 'noopener';
-            actions.append(proofLink);
-        }
-        if (account.account_status === 'pending') {
-            actions.append(button('Approve', `account-${account.id}-approved`, 'button button-primary button-small'), button('Reject', `account-${account.id}-rejected`, 'button button-danger button-small'));
-        } else if (account.account_status === 'approved') {
-            actions.append(button('Disable account', `account-${account.id}-disabled`, 'button button-danger button-small'));
-        } else if (account.account_status === 'disabled') {
-            actions.append(button('Re-enable', `account-${account.id}-approved`, 'button button-primary button-small'));
-        }
-        record.append(info, node('span', account.account_status, `badge status-badge status-${account.account_status}`), actions);
-        list.append(record);
+    const section = panel('Account Management');
+    section.classList.add('account-management');
+    const filters = node('div', undefined, 'account-filter-toolbar');
+    filters.innerHTML = `
+        <label class="account-filter-status">Account status
+            <select name="status">
+                <option value="pending">Pending Approval</option>
+                <option value="approved">Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="disabled">Disabled / Archived</option>
+                <option value="">All Accounts</option>
+            </select>
+        </label>
+        <label>Account type
+            <select name="role">
+                <option value="">All Types</option>
+                <option value="partner">Partner / Proposer</option>
+                <option value="volunteer">Volunteer</option>
+            </select>
+        </label>
+        <label data-account-category-filter hidden>Organization category
+            <select name="category">
+                <option value="">All organization categories</option>
+                <option value="UCC Department / Academic Unit">UCC Department / Academic Unit</option>
+                <option value="Local Government Unit (LGU / Barangay)">Local Government Unit (LGU / Barangay)</option>
+                <option value="Government Agency (e.g., MMDA, DSWD)">Government Agency (e.g., MMDA, DSWD)</option>
+                <option value="NGO / Non-Profit Organization">NGO / Non-Profit</option>
+                <option value="Private Sector / Corporate Partner">Private Sector</option>
+            </select>
+        </label>
+        <label data-account-affiliation-filter hidden>Volunteer affiliation / school / company
+            <input name="affiliation" type="search" placeholder="School, company, or community">
+        </label>
+        <label class="account-search">Search accounts
+            <input name="search" type="search" placeholder="Name, email, or organization">
+        </label>
+        <label>Sort by
+            <select name="sort">
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="alphabetical">Alphabetical (A-Z)</option>
+            </select>
+        </label>`;
+    const list = node('div', undefined, 'record-list account-record-list');
+    const empty = node('div', undefined, 'empty');
+    const detailsDialog = node('dialog', undefined, 'account-details-modal');
+    detailsDialog.setAttribute('aria-labelledby', 'account-details-title');
+    const detailsContent = node('div', undefined, 'account-details-content');
+    detailsDialog.append(detailsContent);
+    detailsDialog.addEventListener('click', event => {
+        if (event.target === detailsDialog) detailsDialog.close();
     });
-    const empty = node('div', status === 'pending' ? 'There are no accounts waiting for approval.' : 'No accounts match this status.', 'empty');
-    empty.hidden = accounts.length > 0;
-    section.append(filters, list, empty);
+    const cleanOrganizationCategory = value => String(value || '')
+        .replace(/\s*\(e\.g\.,[^)]*\)/i, '')
+        .trim();
+    const statusFilter = filters.querySelector('[name="status"]');
+    const roleFilter = filters.querySelector('[name="role"]');
+    const categoryFilter = filters.querySelector('[name="category"]');
+    const affiliationFilter = filters.querySelector('[name="affiliation"]');
+    const searchFilter = filters.querySelector('[name="search"]');
+    const sortFilter = filters.querySelector('[name="sort"]');
+    let currentAccounts = [];
+    statusFilter.value = status;
+
+    const renderRecords = accounts => {
+        const role = roleFilter.value;
+        filters.querySelector('[data-account-category-filter]').hidden = role !== 'partner';
+        filters.querySelector('[data-account-affiliation-filter]').hidden = role !== 'volunteer';
+        const search = searchFilter.value.trim().toLocaleLowerCase();
+        const affiliationSearch = affiliationFilter.value.trim().toLocaleLowerCase();
+        const category = categoryFilter.value;
+        const visibleAccounts = accounts.filter(account => {
+            if (role && account.role !== role) return false;
+            if (category && account.organization_category !== category) return false;
+            const affiliation = `${account.registration_classification || account.volunteer_type || ''} ${account.affiliation_name || ''} ${account.campus || ''}`.toLocaleLowerCase();
+            if (affiliationSearch && !affiliation.includes(affiliationSearch)) return false;
+            const searchable = `${account.first_name} ${account.last_name} ${account.email} ${account.organization_name || ''}`.toLocaleLowerCase();
+            return !search || searchable.includes(search);
+        });
+        visibleAccounts.sort((left, right) => {
+            if (sortFilter.value === 'alphabetical') {
+                return `${left.first_name} ${left.last_name}`.localeCompare(`${right.first_name} ${right.last_name}`);
+            }
+            const leftDate = new Date(String(left.created_at).replace(' ', 'T')).getTime();
+            const rightDate = new Date(String(right.created_at).replace(' ', 'T')).getTime();
+            return sortFilter.value === 'oldest' ? leftDate - rightDate : rightDate - leftDate;
+        });
+        list.replaceChildren();
+        visibleAccounts.forEach(account => {
+            const record = node('article', undefined, 'record account-record');
+            const info = node('div', undefined, 'record-main');
+            const identity = node('div', undefined, 'account-record-identity');
+            identity.append(node('strong', `${account.first_name} ${account.last_name}`));
+            const tags = node('div', undefined, 'account-record-tags');
+            tags.append(
+                node('span', account.account_status.replaceAll('_', ' '), `badge status-badge status-${account.account_status}`),
+                node('span', account.role === 'partner' ? 'Partner' : 'Volunteer', `badge account-type-badge account-type-${account.role}`)
+            );
+            let categoryLabel = '';
+            if (account.role === 'partner') {
+                const categoryName = cleanOrganizationCategory(account.organization_category || account.organization_type || 'Partner');
+                categoryLabel = `${categoryName}: ${account.organization_name || 'Organization not provided'}`;
+            } else {
+                const classification = account.registration_classification || account.volunteer_type || 'Volunteer';
+                const affiliation = account.affiliation_name || account.campus || '';
+                categoryLabel = `Volunteer: ${classification}${affiliation ? ` · ${affiliation}` : ''}`;
+            }
+            tags.append(node('span', categoryLabel, 'badge account-metadata-badge'));
+            identity.append(tags);
+            info.append(identity);
+            if (account.role === 'partner' && account.official_designation) {
+                info.append(node('small', account.official_designation));
+            }
+            info.append(
+                node('small', `${account.email} · ${account.contact_number}`),
+                node('small', `Registered ${dashboardDate(account.created_at, { month: 'short', day: 'numeric', year: 'numeric' })}`)
+            );
+            record.tabIndex = 0;
+            record.setAttribute('role', 'button');
+            record.setAttribute('aria-label', `View full details for ${account.first_name} ${account.last_name}`);
+            record.append(info, node('span', 'View Full Details', 'account-view-details'));
+            const openDetails = () => {
+                detailsDialog.dataset.accountId = String(account.id);
+                const fields = node('dl', undefined, 'account-details-grid');
+                const category = account.role === 'partner'
+                    ? cleanOrganizationCategory(account.organization_category || account.organization_type || 'Partner')
+                    : account.registration_classification || account.volunteer_type || 'Volunteer';
+                const affiliation = account.role === 'partner'
+                    ? account.organization_name || 'Not provided'
+                    : account.affiliation_name || account.campus || 'Not provided';
+                const details = [
+                    ['Full Name', `${account.first_name} ${account.last_name}`],
+                    ['Designation / Role', account.official_designation || account.registration_classification || account.volunteer_type || 'Not provided'],
+                    ['Email Address', account.email],
+                    ['Contact Number', account.contact_number || 'Not provided'],
+                    ['Registration Date', dashboardDate(account.created_at, { month: 'long', day: 'numeric', year: 'numeric' })],
+                    ['Account Type', account.role === 'partner' ? 'Partner / Proposer' : 'Volunteer'],
+                    ['Category', category],
+                    [account.role === 'partner' ? 'Organization Name' : 'Affiliation / School / Company', affiliation],
+                    ['Account Status', account.account_status.replaceAll('_', ' ')]
+                ];
+                details.forEach(([label, value]) => {
+                    const term = node('dt', label);
+                    const description = node('dd', value);
+                    fields.append(term, description);
+                });
+                detailsContent.replaceChildren();
+                const header = node('div', undefined, 'account-details-header');
+                header.append(
+                    node('div', undefined, 'account-details-heading'),
+                    button('Close', 'close-account-details', 'button button-quiet button-small')
+                );
+                const detailTitle = node('h2', `${account.first_name} ${account.last_name}`);
+                detailTitle.id = 'account-details-title';
+                header.querySelector('.account-details-heading').append(
+                    node('span', 'ACCOUNT DETAILS', 'auth-card-kicker'),
+                    detailTitle,
+                    node('span', account.account_status.replaceAll('_', ' '), `badge status-badge status-${account.account_status}`)
+                );
+                detailsContent.append(header, fields);
+                if (account.rejection_reason) {
+                    const reason = node('section', undefined, 'account-rejection-reason');
+                    reason.append(node('h3', 'Rejection reason'), node('p', account.rejection_reason));
+                    detailsContent.append(reason);
+                }
+                const proofPath = account.partner_verification_path || account.affiliation_proof_path;
+                if (proofPath) {
+                    const proof = node('section', undefined, 'account-proof-section');
+                    const proofHeading = node('div', undefined, 'account-proof-heading');
+                    proofHeading.append(node('h3', 'Verification document'));
+                    const proofLink = node('a', 'Open document', 'button button-quiet button-small');
+                    proofLink.href = `${API}/accounts/${account.id}/proof`;
+                    proofLink.target = '_blank';
+                    proofLink.rel = 'noopener';
+                    proofHeading.append(proofLink);
+                    const preview = node('iframe', undefined, 'account-proof-preview');
+                    preview.src = proofLink.href;
+                    preview.title = `Verification document for ${account.first_name} ${account.last_name}`;
+                    proof.append(proofHeading, preview);
+                    detailsContent.append(proof);
+                } else {
+                    detailsContent.append(node('p', 'No verification document was uploaded.', 'empty'));
+                }
+                const actions = node('div', undefined, 'account-details-actions');
+                if (account.account_status === 'pending') {
+                    const approveButton = button('Approve', 'confirm-account-review', 'button button-primary');
+                    approveButton.dataset.status = 'approved';
+                    const rejectButton = button('Reject', 'confirm-account-review', 'button button-danger');
+                    rejectButton.dataset.status = 'rejected';
+                    actions.append(
+                        approveButton,
+                        rejectButton
+                    );
+                } else if (account.account_status === 'approved') {
+                    const disableButton = button('Disable / Archive', 'confirm-account-review', 'button button-danger');
+                    disableButton.dataset.status = 'disabled';
+                    actions.append(disableButton);
+                } else if (account.account_status === 'disabled') {
+                    const enableButton = button('Re-enable', 'confirm-account-review', 'button button-primary');
+                    enableButton.dataset.status = 'approved';
+                    actions.append(enableButton);
+                }
+                if (actions.childElementCount) detailsContent.append(actions);
+                detailsDialog.showModal();
+            };
+            record.addEventListener('click', event => {
+                if (event.target.closest('a, button, input, select, textarea')) return;
+                openDetails();
+            });
+            record.addEventListener('keydown', event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    openDetails();
+                }
+            });
+            list.append(record);
+        });
+        empty.textContent = accounts.length === 0 && statusFilter.value === 'pending'
+            ? 'There are no accounts waiting for approval.'
+            : 'No accounts match the selected filters.';
+        empty.hidden = visibleAccounts.length > 0;
+    };
+
+    detailsContent.addEventListener('click', async event => {
+        const actionButton = event.target.closest('[data-action]');
+        if (!actionButton) return;
+        event.stopPropagation();
+        if (actionButton.dataset.action === 'close-account-details') {
+            detailsDialog.close();
+            return;
+        }
+        if (actionButton.dataset.action === 'confirm-account-review') {
+            const status = actionButton.dataset.status;
+            const accountId = detailsDialog.dataset.accountId;
+            if (!accountId || !['approved', 'rejected', 'disabled'].includes(status)) {
+                const error = new Error('The selected account could not be identified for review.');
+                console.error(error);
+                showMessage(pageMessage, error.message, 'error');
+                return;
+            }
+            const confirmation = node('form', undefined, 'account-action-confirmation');
+            confirmation.noValidate = status !== 'rejected';
+            const message = status === 'approved'
+                ? 'Are you sure you want to approve this account? An automated notification will be sent to the user.'
+                : status === 'rejected'
+                    ? 'Provide a reason for rejecting this account. The user will be notified.'
+                    : status === 'disabled'
+                        ? 'Are you sure you want to disable this active account?'
+                        : 'Are you sure you want to re-enable this account?';
+            confirmation.append(node('p', message));
+            if (status === 'rejected') {
+                const reasonField = node('label', 'Reason for rejection');
+                const reasonInput = node('textarea');
+                reasonInput.name = 'reason';
+                reasonInput.required = true;
+                reasonInput.maxLength = 2000;
+                reasonInput.rows = 3;
+                reasonInput.setAttribute('aria-label', 'Reason for rejection');
+                reasonField.append(reasonInput);
+                confirmation.append(reasonField);
+            }
+            const actions = node('div', undefined, 'account-confirmation-actions');
+            const cancelButton = button('Cancel', 'cancel-account-confirmation', 'button button-quiet');
+            const confirmButton = node('button', 'Confirm', status === 'rejected' || status === 'disabled' ? 'button button-danger' : 'button button-primary');
+            confirmButton.type = 'submit';
+            actions.append(cancelButton, confirmButton);
+            confirmation.append(actions);
+            detailsContent.querySelector('.account-action-confirmation')?.remove();
+            detailsContent.append(confirmation);
+            confirmation.addEventListener('submit', async submitEvent => {
+                submitEvent.preventDefault();
+                submitEvent.stopPropagation();
+                const activeAccountId = detailsDialog.dataset.accountId;
+                const reason = confirmation.elements.reason?.value.trim() || '';
+                if (!activeAccountId) {
+                    const error = new Error('The selected account could not be identified for review.');
+                    console.error(error);
+                    showMessage(pageMessage, error.message, 'error');
+                    return;
+                }
+                if (status === 'rejected' && !reason) {
+                    confirmation.elements.reason?.focus();
+                    showMessage(pageMessage, 'Enter a reason for rejection.', 'error');
+                    return;
+                }
+                confirmButton.disabled = true;
+                try {
+                    await request(`/accounts/${encodeURIComponent(activeAccountId)}/review`, {
+                        method: 'POST',
+                        body: JSON.stringify({ status, reason })
+                    });
+                    detailsDialog.close();
+                    await renderPage('accounts');
+                    showMessage(pageMessage, `Account ${status}.`);
+                } catch (error) {
+                    console.error('Account review failed:', error);
+                    showMessage(pageMessage, error.message, 'error');
+                    confirmButton.disabled = false;
+                }
+            });
+            if (status === 'rejected') confirmation.querySelector('textarea').focus();
+            return;
+        }
+        if (actionButton.dataset.action === 'cancel-account-confirmation') {
+            actionButton.closest('.account-action-confirmation').remove();
+            return;
+        }
+    });
+
+    const initialAccounts = await request(`/accounts${status ? `?status=${encodeURIComponent(status)}` : ''}`);
+    currentAccounts = initialAccounts.accounts;
+    statusFilter.addEventListener('change', async () => {
+        statusFilter.disabled = true;
+        try {
+            const selectedStatus = statusFilter.value;
+            const { accounts } = await request(`/accounts${selectedStatus ? `?status=${encodeURIComponent(selectedStatus)}` : ''}`);
+            currentAccounts = accounts;
+            renderRecords(currentAccounts);
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        } finally {
+            statusFilter.disabled = false;
+        }
+    });
+    [roleFilter, categoryFilter, affiliationFilter, searchFilter, sortFilter].forEach(control => {
+        control.addEventListener(control === searchFilter || control === affiliationFilter ? 'input' : 'change', () => renderRecords(currentAccounts));
+    });
+    renderRecords(currentAccounts);
+    section.append(filters, list, empty, detailsDialog);
     pageContent.append(section);
 }
 
@@ -1328,6 +2314,10 @@ pageContent.addEventListener('click', async event => {
             await showDates(Number(id));
         } else if (action === 'applications') {
             await showApplications(Number(id));
+        } else if (action === 'attendees') {
+            await showPartnerEventAttendees(Number(id));
+        } else if (action === 'attendexport') {
+            await downloadPartnerAttendance(Number(id));
         } else if (action === 'attendance' && id === 'list') {
             await showDateAttendance(Number(value));
         } else if (action === 'attendance' && id !== 'list') {
@@ -1371,28 +2361,134 @@ pageContent.addEventListener('click', async event => {
     }
 });
 
-async function openDocumentForm(proposalId) {
-    const section = panel('Upload proposal document', 'Signed proposal letter, project brief, and a signed MOA or MOU are required before submission.');
-    const form = node('form', undefined, 'panel-form');
-    form.innerHTML = '<label>Document type<select name="documentType" required><option value="signed_proposal_letter">Signed proposal letter</option><option value="project_brief">Project brief</option><option value="moa">MOA</option><option value="mou">MOU</option><option value="other">Other</option></select></label><label>File<input name="file" type="file" accept=".pdf,.jpg,.jpeg,.png" required></label><label><span>Signed document</span><select name="isSigned"><option value="1">Yes</option><option value="0">No</option></select></label><button class="button button-primary" type="submit">Upload</button>';
-    form.addEventListener('submit', async event => {
+function openDocumentForm(proposalId) {
+    document.querySelector('#proposal-upload-modal')?.remove();
+    const dialog = node('dialog', undefined, 'proposal-upload-modal');
+    dialog.id = 'proposal-upload-modal';
+    dialog.setAttribute('aria-labelledby', 'proposal-upload-title');
+    dialog.innerHTML = `
+        <div class="proposal-upload-content">
+            <header class="proposal-upload-header">
+                <div>
+                    <p class="eyebrow">PROPOSAL DOCUMENTS</p>
+                    <h2 id="proposal-upload-title">Upload Proposal Document</h2>
+                    <p>Signed proposal letter, project brief, and signed MOA or MOU are required before submission.</p>
+                </div>
+                <button type="button" class="button button-quiet button-small" data-upload-close aria-label="Close upload dialog">Close</button>
+            </header>
+            <div class="proposal-upload-message" role="status" aria-live="polite" hidden></div>
+            <form class="proposal-upload-form">
+                <label>Document Type
+                    <select name="documentType" required>
+                        <option value="signed_proposal_letter">Signed Proposal Letter</option>
+                        <option value="project_brief">Project Brief</option>
+                        <option value="moa">Signed MOA / MOU</option>
+                        <option value="other">Other Supporting Documents</option>
+                    </select>
+                </label>
+                <label class="proposal-file-drop" data-file-drop>
+                    <span class="proposal-file-drop-title">Choose a file or drag it here</span>
+                    <span class="proposal-file-name" data-file-name>PDF, DOCX, PNG, or JPG · up to 10 MB</span>
+                    <input name="file" type="file" accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg" required>
+                </label>
+                <label class="proposal-signed-toggle"><input name="isSigned" type="checkbox" value="1" checked> This document is signed</label>
+                <label>Document Description / Remarks (Optional)
+                    <input name="description" type="text" maxlength="500" placeholder="Add a short note about this document">
+                </label>
+                <div class="proposal-upload-actions">
+                    <button type="button" class="button button-quiet" data-upload-close>Cancel</button>
+                    <button type="submit" class="button button-primary">Upload File</button>
+                </div>
+            </form>
+        </div>`;
+    const form = dialog.querySelector('form');
+    const fileInput = form.elements.file;
+    const fileName = dialog.querySelector('[data-file-name]');
+    const fileDrop = dialog.querySelector('[data-file-drop]');
+    const modalMessage = dialog.querySelector('.proposal-upload-message');
+    const row = pageContent.querySelector(`tr [data-action="upload-${proposalId}"]`)?.closest('tr');
+    const closeDialog = () => {
+        if (dialog.open) dialog.close();
+        dialog.remove();
+    };
+    dialog.querySelectorAll('[data-upload-close]').forEach(close => close.addEventListener('click', closeDialog));
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog) closeDialog();
+    });
+    dialog.addEventListener('cancel', event => {
         event.preventDefault();
-        const values = Object.fromEntries(new FormData(form));
-        const file = values.file;
-        delete values.file;
-        const payload = new FormData();
-        payload.set('payload', JSON.stringify(values));
-        payload.set('file', file);
-        try {
-            await request(`/proposals/${proposalId}/documents`, { method: 'POST', body: payload });
-            showMessage(pageMessage, 'Document uploaded.');
-            section.remove();
-        } catch (error) {
-            showMessage(pageMessage, error.message, 'error');
+        closeDialog();
+    });
+    fileInput.addEventListener('change', () => {
+        const file = fileInput.files[0];
+        fileName.textContent = file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : 'PDF, DOCX, PNG, or JPG · up to 10 MB';
+    });
+    ['dragenter', 'dragover'].forEach(type => fileDrop.addEventListener(type, event => {
+        event.preventDefault();
+        fileDrop.classList.add('is-dragging');
+    }));
+    ['dragleave', 'drop'].forEach(type => fileDrop.addEventListener(type, event => {
+        event.preventDefault();
+        fileDrop.classList.remove('is-dragging');
+    }));
+    fileDrop.addEventListener('drop', event => {
+        const [file] = event.dataTransfer.files;
+        if (file) {
+            const transfer = new DataTransfer();
+            transfer.items.add(file);
+            fileInput.files = transfer.files;
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
         }
     });
-    pageContent.prepend(section);
-    section.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        const file = fileInput.files[0];
+        if (!file || file.size < 1 || file.size > 10 * 1024 * 1024) {
+            modalMessage.textContent = 'Choose a file between 1 byte and 10 MB.';
+            modalMessage.className = 'proposal-upload-message is-error';
+            modalMessage.hidden = false;
+            return;
+        }
+        const payload = new FormData();
+        payload.set('payload', JSON.stringify({
+            documentType: form.elements.documentType.value,
+            isSigned: form.elements.isSigned.checked,
+            description: form.elements.description.value.trim()
+        }));
+        payload.set('file', file);
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        submit.textContent = 'Uploading…';
+        try {
+            const result = await request(`/proposals/${proposalId}/documents`, { method: 'POST', body: payload });
+            if (Number(result.proposalId) !== proposalId) {
+                throw new Error('The document upload was associated with an unexpected proposal.');
+            }
+            if (row) {
+                const count = row.querySelector('[data-attachment-count]');
+                if (count) count.textContent = `${Number(result.attachmentCount)} document(s) attached`;
+            }
+            modalMessage.textContent = 'Document uploaded successfully.';
+            modalMessage.className = 'proposal-upload-message is-success';
+            modalMessage.hidden = false;
+            form.reset();
+            fileName.textContent = 'PDF, DOCX, PNG, or JPG · up to 10 MB';
+            submit.textContent = 'Done';
+            submit.disabled = false;
+            submit.type = 'button';
+            submit.addEventListener('click', closeDialog, { once: true });
+            showMessage(pageMessage, 'Proposal document uploaded.');
+        } catch (error) {
+            modalMessage.textContent = error.message;
+            modalMessage.className = 'proposal-upload-message is-error';
+            modalMessage.hidden = false;
+            submit.disabled = false;
+            submit.textContent = 'Upload File';
+        }
+    });
+    pageContent.append(dialog);
+    dialog.showModal();
 }
 
 async function showDates(eventId) {
@@ -1633,6 +2729,54 @@ async function showProjectDossier(projectId) {
     const data = await request(`/reports/projects/${projectId}`);
     const section = panel(data.project.title, `${data.project.status.replaceAll('_', ' ')} · ${data.project.periodStart || 'Unscheduled'} to ${data.project.periodEnd || 'Unscheduled'}`);
     section.append(node('p', data.project.summary));
+    const brief = node('section', undefined, 'dossier-section project-brief-details');
+    const briefHeading = node('div', undefined, 'project-brief-heading');
+    briefHeading.append(node('h3', 'Project Brief'));
+    const briefDownload = node('a', 'Download / Print PDF', 'button button-quiet button-small');
+    briefDownload.href = `${API}/proposals/${projectId}/brief.pdf`;
+    briefHeading.append(briefDownload);
+    brief.append(briefHeading);
+    const briefGroups = [
+        ['Co-Proponents / Partner Entities', (data.project.proponents || []).join(', ') || 'No co-proponents provided.'],
+        ['Program Duration', data.project.duration || 'Not provided'],
+        ['Activity Components', (data.project.activityComponents || []).join('\n') || 'No activity components provided.'],
+        ['Justification / Objectives', data.project.justification || 'Not provided'],
+        ['Target Beneficiaries & Headcount', data.project.targetBeneficiaries || 'Not provided'],
+        ['Target Outputs / Success Indicators', data.project.targetOutputs || 'Not provided'],
+        ['Possible Risks & Mitigation Plan', data.project.possibleRisks || 'Not provided'],
+        ['Expected Private / External Partnerships', data.project.expectedPrivatePartnerships || 'Not provided']
+    ];
+    briefGroups.forEach(([label, value]) => {
+        const detail = node('div', undefined, 'project-brief-field');
+        detail.append(node('strong', label), node('p', value));
+        brief.append(detail);
+    });
+    const budget = node('div', undefined, 'project-brief-budget');
+    budget.append(node('strong', 'Estimated Cost Breakdown'));
+    const budgetItems = data.project.estimatedCostItems || [];
+    if (!budgetItems.length) {
+        budget.append(node('p', 'No budget items provided.'));
+    } else {
+        const table = node('table', undefined, 'proposal-table');
+        table.innerHTML = '<thead><tr><th>Item</th><th>Unit / Pax</th><th>Quantity</th><th>Unit Cost</th><th>Subtotal</th></tr></thead>';
+        const tbody = node('tbody');
+        budgetItems.forEach(item => {
+            const row = node('tr');
+            row.append(
+                node('td', item.description),
+                node('td', item.unit),
+                node('td', item.quantity),
+                node('td', `₱${Number(item.cost).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`),
+                node('td', `₱${Number(item.subtotal).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`)
+            );
+            tbody.append(row);
+        });
+        table.append(tbody);
+        budget.append(table);
+    }
+    budget.append(node('p', `Total Estimated Cost: ₱${Number(data.project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
+    brief.append(budget);
+    section.append(brief);
     const groups = [
         ['Partners', data.partners.map(item => `${item.organization_name} (${item.relationship})`)],
         ['Schedule', data.schedules.map(item => `${item.event_date} · ${item.event_title} / ${item.activity_title} · ${item.start_time}–${item.end_time} · ${item.venue}`)],
@@ -1651,7 +2795,8 @@ async function showProjectDossier(projectId) {
     documents.append(node('h3', 'Documentation'));
     if (!data.documents.length) documents.append(node('p', 'No documents attached.'));
     data.documents.forEach(item => {
-        const link = node('a', `${item.document_type.replaceAll('_', ' ')} · ${item.original_name}${Number(item.is_signed) ? ' · signed' : ''}`);
+        const detail = item.description ? ` · ${item.description}` : '';
+        const link = node('a', `${item.document_type.replaceAll('_', ' ')} · ${item.original_name}${Number(item.is_signed) ? ' · signed' : ''}${detail}`);
         link.href = `${API}/documents/${item.id}`;
         link.target = '_blank';
         link.rel = 'noopener';
