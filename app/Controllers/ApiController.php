@@ -75,6 +75,9 @@ final class ApiController
         if ($path === '/directory' && $method === 'POST') {
             $this->createDirectoryEntry();
         }
+        if (preg_match('#^/directory/([0-9]+)$#', $path, $matches) && $method === 'GET') {
+            $this->partnerDirectoryProfile(Http::positiveId($matches[1]));
+        }
         if (preg_match('#^/directory/([0-9]+)$#', $path, $matches) && $method === 'PUT') {
             $this->updatePartnerDirectory(Http::positiveId($matches[1]));
         }
@@ -110,6 +113,9 @@ final class ApiController
         if (preg_match('#^/proposals/([0-9]+)/documents$#', $path, $matches) && $method === 'POST') {
             $this->uploadProposalDocument(Http::positiveId($matches[1]));
         }
+        if (preg_match('#^/proposals/([0-9]+)/documents$#', $path, $matches) && $method === 'GET') {
+            $this->proposalDocuments(Http::positiveId($matches[1]));
+        }
         if (preg_match('#^/documents/([0-9]+)$#', $path, $matches) && $method === 'GET') {
             $this->downloadDocument(Http::positiveId($matches[1]));
         }
@@ -142,6 +148,9 @@ final class ApiController
         }
         if ($path === '/events' && $method === 'GET') {
             $this->listEvents();
+        }
+        if ($path === '/events/admin-dashboard' && $method === 'GET') {
+            $this->adminEventsDashboard();
         }
         if ($path === '/partner/calendar' && $method === 'GET') {
             $this->partnerCalendar();
@@ -532,10 +541,75 @@ final class ApiController
 
     private function directory(): never
     {
-        Http::user();
+        Http::requireRole('admin', 'partner');
         $statement = $this->db->query(
             "SELECT p.user_id AS id, p.organization_name, p.organization_type, p.organization_category,
-                    p.official_designation, p.address, u.account_status, u.email,
+                    p.official_designation, p.address, u.account_status, u.email, u.contact_number,
+                    u.first_name, u.last_name,
+                    GROUP_CONCAT(DISTINCT s.name ORDER BY s.name SEPARATOR ', ') AS sectors,
+                    GROUP_CONCAT(DISTINCT CONCAT(s.name, ' / ', sc.name) ORDER BY s.name, sc.name SEPARATOR ', ') AS subcategories,
+                    GROUP_CONCAT(DISTINCT sc.id ORDER BY sc.id SEPARATOR ',') AS subcategory_ids,
+                    (SELECT COUNT(DISTINCT pp.proposal_id)
+                     FROM proposal_partners pp JOIN proposals pr ON pr.id = pp.proposal_id
+                     WHERE pp.partner_user_id = p.user_id AND pp.invitation_status = 'accepted'
+                       AND pr.status IN ('approved', 'active')) AS linked_project_count,
+                    (SELECT COUNT(DISTINCT pp.proposal_id)
+                     FROM proposal_partners pp JOIN proposals pr ON pr.id = pp.proposal_id
+                     WHERE pp.partner_user_id = p.user_id AND pp.invitation_status = 'accepted'
+                       AND pr.status = 'active'
+                       AND (pr.period_end IS NULL OR pr.period_end >= CURRENT_DATE)) AS active_project_count,
+                    (SELECT COUNT(DISTINCT pp.proposal_id)
+                     FROM proposal_partners pp JOIN proposals pr ON pr.id = pp.proposal_id
+                     WHERE pp.partner_user_id = p.user_id AND pp.invitation_status = 'accepted'
+                       AND pr.status IN ('approved', 'active')
+                       AND pr.period_end IS NOT NULL AND pr.period_end < CURRENT_DATE) AS completed_project_count,
+                    (SELECT COUNT(DISTINCT e.id)
+                     FROM events e
+                     JOIN proposals pr ON pr.id = e.proposal_id
+                     JOIN event_dates ed ON ed.event_id = e.id
+                     WHERE (e.organizer_user_id = p.user_id OR EXISTS (
+                         SELECT 1 FROM event_partners ep
+                         WHERE ep.event_id = e.id AND ep.partner_user_id = p.user_id
+                     )) AND pr.status IN ('approved', 'active')
+                       AND ed.event_date >= CURRENT_DATE) AS upcoming_event_count,
+                    (SELECT COUNT(DISTINCT e.id)
+                     FROM events e
+                     JOIN proposals pr ON pr.id = e.proposal_id
+                     JOIN event_dates ed ON ed.event_id = e.id
+                     WHERE (e.organizer_user_id = p.user_id OR EXISTS (
+                         SELECT 1 FROM event_partners ep
+                         WHERE ep.event_id = e.id AND ep.partner_user_id = p.user_id
+                     )) AND pr.status IN ('approved', 'active')
+                       AND ed.event_date < CURRENT_DATE) AS past_event_count
+             FROM partners p
+             JOIN users u ON u.id = p.user_id
+             LEFT JOIN partner_subcategories ps ON ps.partner_user_id = p.user_id
+             LEFT JOIN subcategories sc ON sc.id = ps.subcategory_id
+             LEFT JOIN sectors s ON s.id = sc.sector_id
+             WHERE u.account_status = 'approved'
+             GROUP BY p.user_id, p.organization_name, p.organization_type, p.organization_category,
+                      p.official_designation, p.address, u.account_status, u.email, u.contact_number,
+                      u.first_name, u.last_name
+             ORDER BY p.organization_name"
+        );
+        $sectors = $this->db->query(
+            'SELECT s.id AS sector_id, s.name AS sector_name, sc.id AS subcategory_id, sc.name AS subcategory_name
+             FROM sectors s LEFT JOIN subcategories sc ON sc.sector_id = s.id ORDER BY s.name, sc.name'
+        )->fetchAll();
+        Http::json(['partners' => $statement->fetchAll(), 'sectors' => $sectors]);
+    }
+
+    private function partnerDirectoryProfile(int $partnerId): never
+    {
+        $user = Http::user();
+        if (!in_array($user['role'], ['admin', 'partner'], true)) {
+            throw new RuntimeException('The partner directory is available to CES Admins and partner accounts.', 403);
+        }
+
+        $profile = $this->db->prepare(
+            "SELECT p.user_id AS id, p.organization_name, p.organization_type, p.organization_category,
+                    p.official_designation, p.address, p.verification_path,
+                    u.account_status, u.email, u.contact_number, u.first_name, u.last_name,
                     GROUP_CONCAT(DISTINCT s.name ORDER BY s.name SEPARATOR ', ') AS sectors,
                     GROUP_CONCAT(DISTINCT CONCAT(s.name, ' / ', sc.name) ORDER BY s.name, sc.name SEPARATOR ', ') AS subcategories,
                     GROUP_CONCAT(DISTINCT sc.id ORDER BY sc.id SEPARATOR ',') AS subcategory_ids
@@ -544,16 +618,41 @@ final class ApiController
              LEFT JOIN partner_subcategories ps ON ps.partner_user_id = p.user_id
              LEFT JOIN subcategories sc ON sc.id = ps.subcategory_id
              LEFT JOIN sectors s ON s.id = sc.sector_id
-             WHERE u.account_status = 'approved'
+             WHERE p.user_id = ? AND u.account_status = 'approved'
              GROUP BY p.user_id, p.organization_name, p.organization_type, p.organization_category,
-                      p.official_designation, p.address, u.account_status, u.email
-             ORDER BY p.organization_name"
+                      p.official_designation, p.address, p.verification_path, u.account_status,
+                      u.email, u.contact_number, u.first_name, u.last_name"
         );
-        $sectors = $this->db->query(
-            'SELECT s.id AS sector_id, s.name AS sector_name, sc.id AS subcategory_id, sc.name AS subcategory_name
-             FROM sectors s LEFT JOIN subcategories sc ON sc.sector_id = s.id ORDER BY s.name, sc.name'
-        )->fetchAll();
-        Http::json(['partners' => $statement->fetchAll(), 'sectors' => $sectors]);
+        $profile->execute([$partnerId]);
+        $partner = $profile->fetch();
+        if (!$partner) {
+            throw new RuntimeException('Approved partner organization was not found.', 404);
+        }
+
+        $projects = $this->db->prepare(
+            "SELECT pr.id, pr.title, pr.status, pr.period_start, pr.period_end,
+                    (SELECT GROUP_CONCAT(DISTINCT e.title ORDER BY e.title SEPARATOR ', ')
+                     FROM events e
+                     WHERE e.proposal_id = pr.id
+                       AND (e.organizer_user_id = ? OR EXISTS (
+                           SELECT 1 FROM event_partners ep
+                           WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+                       ))) AS events,
+                    (SELECT COUNT(*) FROM documents d
+                     WHERE d.proposal_id = pr.id AND d.document_type = 'moa' AND d.is_signed = 1) AS signed_moa_count,
+                    (SELECT COUNT(*) FROM documents d
+                     WHERE d.proposal_id = pr.id AND d.document_type = 'mou' AND d.is_signed = 1) AS signed_mou_count
+             FROM proposal_partners pp
+             JOIN proposals pr ON pr.id = pp.proposal_id
+             WHERE pp.partner_user_id = ? AND pp.invitation_status = 'accepted'
+               AND pr.status IN ('approved', 'active')
+             ORDER BY pr.updated_at DESC, pr.id DESC"
+        );
+        $projects->execute([$partnerId, $partnerId, $partnerId]);
+
+        $partner['verification_available'] = !empty($partner['verification_path']);
+        unset($partner['verification_path']);
+        Http::json(['partner' => $partner, 'projects' => $projects->fetchAll()]);
     }
 
     private function createDirectoryEntry(): never
@@ -1045,7 +1144,49 @@ final class ApiController
         }
         $count = $this->db->prepare('SELECT COUNT(*) FROM documents WHERE proposal_id = ?');
         $count->execute([$proposalId]);
-        Http::json(['id' => (int) $this->db->lastInsertId(), 'proposalId' => $proposalId, 'attachmentCount' => (int) $count->fetchColumn(), 'message' => 'Document uploaded.'], 201);
+        Http::json([
+            'id' => (int) $this->db->lastInsertId(),
+            'proposalId' => $proposalId,
+            'attachmentCount' => (int) $count->fetchColumn(),
+            'readiness' => $this->proposalDocumentReadiness($proposalId),
+            'message' => 'Document uploaded.',
+        ], 201);
+    }
+
+    private function proposalDocuments(int $proposalId): never
+    {
+        $user = Http::user();
+        $this->assertProposalAccess($proposalId, $user, true);
+        $documents = $this->db->prepare(
+            'SELECT id, document_type, original_name, is_signed, created_at
+             FROM documents
+             WHERE proposal_id = ?
+             ORDER BY created_at DESC, id DESC'
+        );
+        $documents->execute([$proposalId]);
+        Http::json([
+            'documents' => $documents->fetchAll(),
+            'readiness' => $this->proposalDocumentReadiness($proposalId),
+        ]);
+    }
+
+    private function proposalDocumentReadiness(int $proposalId): array
+    {
+        $statement = $this->db->prepare(
+            "SELECT
+                MAX(document_type = 'signed_proposal_letter' AND is_signed = 1) AS has_letter,
+                MAX(document_type = 'project_brief') AS has_brief,
+                MAX(document_type IN ('moa', 'mou') AND is_signed = 1) AS has_agreement
+             FROM documents
+             WHERE proposal_id = ?"
+        );
+        $statement->execute([$proposalId]);
+        $documents = $statement->fetch() ?: [];
+        return [
+            'signed_proposal_letter' => (bool) ($documents['has_letter'] ?? false),
+            'project_brief' => (bool) ($documents['has_brief'] ?? false),
+            'signed_moa_mou' => (bool) ($documents['has_agreement'] ?? false),
+        ];
     }
 
     private function downloadDocument(int $documentId): never
@@ -1082,16 +1223,8 @@ final class ApiController
     {
         $user = Http::user();
         $this->assertProposalAccess($proposalId, $user, true);
-        $statement = $this->db->prepare(
-            "SELECT
-                SUM(document_type = 'signed_proposal_letter' AND is_signed = 1) AS has_letter,
-                SUM(document_type = 'project_brief') AS has_brief,
-                SUM(document_type IN ('moa', 'mou') AND is_signed = 1) AS has_agreement
-             FROM documents WHERE proposal_id = ?"
-        );
-        $statement->execute([$proposalId]);
-        $documents = $statement->fetch();
-        if ((int) $documents['has_letter'] < 1 || (int) $documents['has_brief'] < 1 || (int) $documents['has_agreement'] < 1) {
+        $readiness = $this->proposalDocumentReadiness($proposalId);
+        if (in_array(false, $readiness, true)) {
             throw new RuntimeException('Submission requires a signed proposal letter, project brief, and at least one signed MOA or MOU.');
         }
         $update = $this->db->prepare("UPDATE proposals SET status = 'submitted', submitted_at = NOW() WHERE id = ? AND status IN ('draft', 'revision')");
@@ -1413,6 +1546,126 @@ final class ApiController
         Http::json(['events' => $statement->fetchAll()]);
     }
 
+    private function adminEventsDashboard(): never
+    {
+        Http::requireRole('admin');
+        $events = $this->db->query(
+            "SELECT e.id, e.proposal_id, e.title, e.description, e.capacity, p.title AS project_title,
+                    p.status AS proposal_status,
+                    (SELECT MIN(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS date_start,
+                    (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS date_end,
+                    (SELECT MIN(a.start_time)
+                     FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
+                     WHERE ed.event_id = e.id) AS start_time,
+                    (SELECT MAX(a.end_time)
+                     FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
+                     WHERE ed.event_id = e.id) AS end_time,
+                    (SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
+                     FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
+                     WHERE ed.event_id = e.id) AS venues,
+                    (SELECT MIN(ed.event_date) FROM event_dates ed
+                     WHERE ed.event_id = e.id AND ed.event_date >= CURDATE()) AS next_event_date,
+                    CASE
+                        WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date = CURDATE()) THEN 'ongoing'
+                        WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date > CURDATE()) THEN 'upcoming'
+                        ELSE 'completed'
+                    END AS event_status,
+                    (SELECT COUNT(*) FROM event_applications ea
+                     WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
+                    (SELECT COALESCE(SUM(a.status = 'present'), 0)
+                     FROM event_dates ed JOIN attendance a ON a.event_date_id = ed.id
+                     WHERE ed.event_id = e.id) +
+                    (SELECT COALESCE(SUM(pc.participant_count), 0)
+                     FROM event_dates ed JOIN participant_counts pc ON pc.event_date_id = ed.id
+                     WHERE ed.event_id = e.id) AS attendance_headcount,
+                    (SELECT GROUP_CONCAT(DISTINCT partner.organization_name ORDER BY partner.organization_name SEPARATOR ', ')
+                     FROM partners partner
+                     WHERE partner.user_id = p.owner_user_id
+                        OR partner.user_id IN (
+                            SELECT ep.partner_user_id FROM event_partners ep WHERE ep.event_id = e.id
+                        )) AS partner_name
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE p.status IN ('approved', 'active')
+             ORDER BY next_event_date, e.title"
+        )->fetchAll();
+
+        $summary = $this->db->query(
+            "SELECT
+                (SELECT COUNT(*) FROM events e JOIN proposals p ON p.id = e.proposal_id
+                 WHERE p.status IN ('approved', 'active')
+                   AND EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date >= CURDATE())) AS scheduled_events,
+                (SELECT COUNT(DISTINCT ea.volunteer_user_id)
+                 FROM event_applications ea
+                 JOIN events e ON e.id = ea.event_id
+                 JOIN proposals p ON p.id = e.proposal_id
+                 WHERE p.status IN ('approved', 'active') AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
+                (SELECT
+                    (SELECT COUNT(*) FROM attendance a
+                     JOIN event_dates ed ON ed.id = a.event_date_id
+                     JOIN events e ON e.id = ed.event_id
+                     JOIN proposals p ON p.id = e.proposal_id
+                     WHERE p.status IN ('approved', 'active') AND a.status = 'present')
+                    +
+                    (SELECT COALESCE(SUM(pc.participant_count), 0)
+                     FROM participant_counts pc
+                     JOIN event_dates ed ON ed.id = pc.event_date_id
+                     JOIN events e ON e.id = ed.event_id
+                     JOIN proposals p ON p.id = e.proposal_id
+                     WHERE p.status IN ('approved', 'active'))) AS attendance_headcount,
+                (SELECT COUNT(*) FROM events e JOIN proposals p ON p.id = e.proposal_id
+                 WHERE p.status IN ('approved', 'active')
+                   AND EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id)
+                   AND NOT EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date >= CURDATE())) AS completed_programs"
+        )->fetch() ?: [];
+
+        $month = (string) ($_GET['month'] ?? date('Y-m'));
+        if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $month)) {
+            throw new RuntimeException('Calendar month must use YYYY-MM format.');
+        }
+        $monthStart = \DateTimeImmutable::createFromFormat('!Y-m', $month);
+        if (!$monthStart || $monthStart->format('Y-m') !== $month) {
+            throw new RuntimeException('Calendar month is invalid.');
+        }
+        $calendar = $this->db->prepare(
+            "SELECT e.id, ed.id AS event_date_id, e.title, p.title AS project_title, ed.event_date,
+                    CASE
+                        WHEN ed.event_date = CURDATE() THEN 'ongoing'
+                        WHEN ed.event_date > CURDATE() THEN 'upcoming'
+                        ELSE 'completed'
+                    END AS event_status,
+                    (SELECT MIN(a.start_time) FROM activities a WHERE a.event_date_id = ed.id) AS start_time,
+                    (SELECT MAX(a.end_time) FROM activities a WHERE a.event_date_id = ed.id) AS end_time,
+                    (SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
+                     FROM activities a WHERE a.event_date_id = ed.id) AS venues,
+                    (SELECT COUNT(*) FROM event_applications ea
+                     WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
+                    (SELECT COUNT(*) FROM attendance a
+                     WHERE a.event_date_id = ed.id AND a.status = 'present') +
+                    (SELECT COALESCE(SUM(pc.participant_count), 0)
+                     FROM participant_counts pc WHERE pc.event_date_id = ed.id) AS attendance_headcount,
+                    (SELECT GROUP_CONCAT(DISTINCT partner.organization_name ORDER BY partner.organization_name SEPARATOR ', ')
+                     FROM partners partner
+                     WHERE partner.user_id = p.owner_user_id
+                        OR partner.user_id IN (
+                            SELECT ep.partner_user_id FROM event_partners ep WHERE ep.event_id = e.id
+                        )) AS partner_name
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE p.status IN ('approved', 'active')
+               AND ed.event_date >= ? AND ed.event_date < ?
+             ORDER BY ed.event_date, e.title"
+        );
+        $calendar->execute([$monthStart->format('Y-m-d'), $monthStart->modify('+1 month')->format('Y-m-d')]);
+        Http::json([
+            'events' => $events,
+            'metrics' => array_map('intval', $summary),
+            'month' => $month,
+            'calendar' => $calendar->fetchAll(),
+        ]);
+    }
+
     private function partnerCalendar(): never
     {
         $user = Http::requireRole('partner');
@@ -1464,17 +1717,31 @@ final class ApiController
 
     private function exportEventAttendance(int $eventId): never
     {
-        $user = Http::requireRole('partner');
-        $this->assertEventOrganizer($eventId, $user);
+        $user = Http::user();
+        if (!in_array($user['role'], ['admin', 'partner'], true)) {
+            throw new RuntimeException('You cannot export attendance for this event.', 403);
+        }
+        if ($user['role'] === 'partner') {
+            $this->assertEventOrganizer($eventId, $user);
+        }
         $attendance = $this->db->prepare(
             "SELECT e.title AS event_title, ed.event_date,
                     u.first_name, u.last_name, u.email,
+                    COALESCE(NULLIF(vp.registration_classification, ''), NULLIF(vp.affiliation_name, ''),
+                        CASE vp.volunteer_type
+                            WHEN 'student' THEN 'Student'
+                            WHEN 'professor' THEN 'Faculty'
+                            WHEN 'tanod' THEN 'Community Resident'
+                            WHEN 'civilian' THEN 'Community Resident'
+                            ELSE 'Other'
+                        END) AS affiliation,
                     ea.status AS application_status, a.status AS attendance_status,
                     a.scanned_at, a.note
              FROM events e
              JOIN event_dates ed ON ed.event_id = e.id
              LEFT JOIN event_applications ea ON ea.event_id = e.id
              LEFT JOIN users u ON u.id = ea.volunteer_user_id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = ea.volunteer_user_id
              LEFT JOIN attendance a ON a.application_id = ea.id AND a.event_date_id = ed.id
              WHERE e.id = ?
              ORDER BY ed.event_date, u.last_name, u.first_name"
@@ -1503,7 +1770,7 @@ final class ApiController
         }
         fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, [
-            'Record type', 'Event', 'Event date', 'Attendee name', 'Email',
+            'Record type', 'Event', 'Event date', 'Attendee name', 'Email', 'Affiliation',
             'Application status', 'Attendance status', 'Scanned at', 'Note',
             'Participant group', 'Participant count',
         ]);
@@ -1514,6 +1781,7 @@ final class ApiController
                 $row['event_date'],
                 trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? '')),
                 $row['email'] ?? '',
+                $row['affiliation'] ?? '',
                 $row['application_status'] ?? '',
                 $row['attendance_status'] ?? '',
                 $row['scanned_at'] ?? '',
@@ -1527,6 +1795,7 @@ final class ApiController
                 'Community participant count',
                 $row['event_title'],
                 $row['event_date'],
+                '',
                 '',
                 '',
                 '',
@@ -1627,8 +1896,18 @@ final class ApiController
         $this->assertEventOrganizer($eventId, $user);
         $statement = $this->db->prepare(
             "SELECT ea.id, ea.volunteer_user_id, ea.status, ea.applied_at, u.first_name, u.last_name, u.email,
+                    COALESCE(NULLIF(vp.registration_classification, ''), NULLIF(vp.affiliation_name, ''),
+                        CASE vp.volunteer_type
+                            WHEN 'student' THEN 'Student'
+                            WHEN 'professor' THEN 'Faculty'
+                            WHEN 'tanod' THEN 'Community Resident'
+                            WHEN 'civilian' THEN 'Community Resident'
+                            ELSE 'Other'
+                        END) AS affiliation,
                     (SELECT COUNT(*) FROM attendance a WHERE a.application_id = ea.id AND a.status = 'present') AS attendance_count
-             FROM event_applications ea JOIN users u ON u.id = ea.volunteer_user_id
+             FROM event_applications ea
+             JOIN users u ON u.id = ea.volunteer_user_id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = ea.volunteer_user_id
              WHERE ea.event_id = ? ORDER BY ea.applied_at DESC"
         );
         $statement->execute([$eventId]);
@@ -1642,9 +1921,18 @@ final class ApiController
         $this->assertEventOrganizer($eventId, $user);
         $statement = $this->db->prepare(
             "SELECT ea.id AS application_id, u.first_name, u.last_name, u.email,
+                    COALESCE(NULLIF(vp.registration_classification, ''), NULLIF(vp.affiliation_name, ''),
+                        CASE vp.volunteer_type
+                            WHEN 'student' THEN 'Student'
+                            WHEN 'professor' THEN 'Faculty'
+                            WHEN 'tanod' THEN 'Community Resident'
+                            WHEN 'civilian' THEN 'Community Resident'
+                            ELSE 'Other'
+                        END) AS affiliation,
                     a.status AS attendance_status, a.note AS attendance_note, a.scanned_at
              FROM event_applications ea
              JOIN users u ON u.id = ea.volunteer_user_id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = ea.volunteer_user_id
              LEFT JOIN attendance a ON a.application_id = ea.id AND a.event_date_id = ?
              WHERE ea.event_id = ? AND ea.status = 'approved'
              ORDER BY u.last_name, u.first_name"
@@ -2247,16 +2535,11 @@ final class ApiController
         }
         $this->assertProposalAccess($proposalId, $user, false);
         $project = $this->proposal($proposalId);
-        $eventAccess = '';
-        $eventParams = [$proposalId];
-        if ($user['role'] === 'partner') {
-            $eventAccess =
-                ' AND (e.organizer_user_id = ? OR EXISTS (
-                    SELECT 1 FROM event_partners ep
-                    WHERE ep.event_id = e.id AND ep.partner_user_id = ?
-                ))';
-            array_push($eventParams, (int) $user['id'], (int) $user['id']);
-        }
+        $eventAccess = "(? = 'admin' OR e.organizer_user_id = ? OR EXISTS (
+            SELECT 1 FROM event_partners ep
+            WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+        ))";
+        $eventParams = [$proposalId, $user['role'], (int) $user['id'], (int) $user['id']];
 
         $partners = $this->db->prepare(
             "SELECT p.organization_name, p.organization_type, pp.relationship
@@ -2267,11 +2550,12 @@ final class ApiController
         $partners->execute([$proposalId]);
 
         $schedules = $this->db->prepare(
-            'SELECT e.title AS event_title, ed.event_date, a.title AS activity_title, a.start_time,
+            "SELECT e.title AS event_title, ed.event_date, a.title AS activity_title, a.start_time,
                     a.end_time, a.venue, a.target_participants, a.activity_lead
              FROM events e JOIN event_dates ed ON ed.event_id = e.id
              JOIN activities a ON a.event_date_id = ed.id
-             WHERE e.proposal_id = ?' . $eventAccess . ' ORDER BY ed.event_date, a.start_time'
+             WHERE e.proposal_id = ? AND $eventAccess
+             ORDER BY ed.event_date, a.start_time"
         );
         $schedules->execute($eventParams);
 
@@ -2284,26 +2568,31 @@ final class ApiController
              FROM events e JOIN event_dates ed ON ed.event_id = e.id
              LEFT JOIN event_applications ea ON ea.event_id = e.id
              LEFT JOIN attendance at ON at.application_id = ea.id AND at.event_date_id = ed.id
-             WHERE e.proposal_id = ?' . $eventAccess . ' GROUP BY e.id, ed.id ORDER BY ed.event_date"
+             WHERE e.proposal_id = ? AND $eventAccess
+             GROUP BY e.id, e.title, ed.id, ed.event_date
+             ORDER BY ed.event_date"
         );
         $attendance->execute($eventParams);
 
         $volunteers = $this->db->prepare(
-            'SELECT e.title AS event_title, u.first_name, u.last_name,
+            "SELECT e.title AS event_title, u.first_name, u.last_name,
                     COALESCE(vp.registration_classification, vp.volunteer_type) AS volunteer_type,
                     ea.status AS application_status
              FROM events e JOIN event_applications ea ON ea.event_id = e.id
              JOIN users u ON u.id = ea.volunteer_user_id
              JOIN volunteer_profiles vp ON vp.user_id = u.id
-             WHERE e.proposal_id = ?' . $eventAccess . ' ORDER BY e.title, u.last_name, u.first_name'
+             WHERE e.proposal_id = ? AND $eventAccess
+             ORDER BY e.title, u.last_name, u.first_name"
         );
         $volunteers->execute($eventParams);
 
         $participants = $this->db->prepare(
-            'SELECT e.title AS event_title, ed.event_date, pc.participant_group, SUM(pc.participant_count) AS participant_count
+            "SELECT e.title AS event_title, ed.event_date, pc.participant_group, SUM(pc.participant_count) AS participant_count
              FROM participant_counts pc JOIN event_dates ed ON ed.id = pc.event_date_id
              JOIN events e ON e.id = ed.event_id
-            WHERE e.proposal_id = ?' . $eventAccess . ' GROUP BY ed.id, pc.participant_group ORDER BY ed.event_date, pc.participant_group'
+             WHERE e.proposal_id = ? AND $eventAccess
+             GROUP BY e.title, ed.id, ed.event_date, pc.participant_group
+             ORDER BY ed.event_date, pc.participant_group"
         );
         $participants->execute($eventParams);
 

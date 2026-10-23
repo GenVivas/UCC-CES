@@ -492,6 +492,7 @@ async function renderPage(page) {
     }
     const pageRoles = {
         proposals: ['admin', 'partner'],
+        directory: ['admin', 'partner'],
         accounts: ['admin'],
         reports: ['admin', 'partner']
     };
@@ -1380,69 +1381,282 @@ async function createProposal(event) {
 
 async function renderDirectory() {
     const { partners, sectors = [] } = await request('/directory');
+    const section = panel('Partner catalog', 'Explore approved organizations, connect with potential co-proponents, and view their CES collaboration history.');
+    section.classList.add('partner-catalog');
+    const toolbar = node('div', undefined, 'partner-catalog-toolbar');
+    const intro = node('div', undefined, 'partner-catalog-intro');
+    intro.append(node('span', `${partners.length} approved organizations`, 'partner-catalog-count'));
+    const toolbarActions = node('div', undefined, 'partner-catalog-actions');
     if (currentUser.role === 'admin') {
-        const management = panel('Manage partner directory', 'Create sector classifications, add subcategories, and assign organizations to one or more subcategories.');
-        const sectorForm = node('form', undefined, 'panel-form directory-management-form');
-        sectorForm.innerHTML = '<label>New sector<input name="name" maxlength="120" required></label><button class="button button-primary" type="submit">Add sector</button>';
-        sectorForm.addEventListener('submit', async event => {
-            event.preventDefault();
-            try {
-                await request('/directory', { method: 'POST', body: JSON.stringify({ type: 'sector', name: new FormData(sectorForm).get('name') }) });
-                await renderPage('directory');
-                showMessage(pageMessage, 'Sector added.');
-            } catch (error) {
-                showMessage(pageMessage, error.message, 'error');
-            }
-        });
-        const subcategoryForm = node('form', undefined, 'panel-form directory-management-form');
-        subcategoryForm.innerHTML = '<label>Sector<select name="sectorId" required></select></label><label>New subcategory<input name="name" maxlength="120" required></label><button class="button button-primary" type="submit">Add subcategory</button>';
-        sectors.filter(item => item.subcategory_id === null).forEach(item => subcategoryForm.elements.sectorId.add(new Option(item.sector_name, item.sector_id)));
-        sectors.filter(item => item.subcategory_id !== null).forEach(item => {
-            if (!Array.from(subcategoryForm.elements.sectorId.options).some(option => option.value === String(item.sector_id))) {
-                subcategoryForm.elements.sectorId.add(new Option(item.sector_name, item.sector_id));
-            }
-        });
-        subcategoryForm.addEventListener('submit', async event => {
-            event.preventDefault();
-            try {
-                await request('/directory', {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        type: 'subcategory',
-                        sectorId: subcategoryForm.elements.sectorId.value,
-                        name: subcategoryForm.elements.name.value
-                    })
-                });
-                await renderPage('directory');
-                showMessage(pageMessage, 'Subcategory added.');
-            } catch (error) {
-                showMessage(pageMessage, error.message, 'error');
-            }
-        });
-        management.append(sectorForm, subcategoryForm);
-        pageContent.append(management);
+        const manage = button('Manage sectors', 'manage-sectors', 'button button-quiet');
+        manage.addEventListener('click', () => openSectorManager(sectors));
+        toolbarActions.append(manage);
     }
-    if (!partners.length) {
-        pageContent.append(node('div', 'No approved partners are listed yet.', 'empty'));
-        return;
-    }
-    const filters = node('div', undefined, 'proposal-filters directory-filters');
-    filters.innerHTML = '<label>Search organizations<input name="search" type="search" placeholder="Name, type, sector, or location"></label>';
-    const list = node('div', undefined, 'record-list');
+    toolbar.append(intro, toolbarActions);
+
+    const filters = node('div', undefined, 'directory-toolbar');
+    const categories = [
+        ['UCC Academic Units', 'UCC Department / Academic Unit'],
+        ['Local Government Units (LGU / Barangay)', 'Local Government Unit (LGU / Barangay)'],
+        ['Government Agencies (e.g., MMDA, DSWD)', 'Government Agency (e.g., MMDA, DSWD)'],
+        ['NGOs / Non-Profits', 'NGO / Non-Profit Organization'],
+        ['Private Sector / Corporate Partners', 'Private Sector / Corporate Partner']
+    ];
+    const searchLabel = node('label', 'Search partners');
+    const search = node('input');
+    search.type = 'search';
+    search.name = 'search';
+    search.placeholder = 'Partner, representative, email, phone, or location';
+    searchLabel.append(search);
+    const categoryLabel = node('label', 'Organization category');
+    const categoryFilter = node('select');
+    categoryFilter.name = 'category';
+    categoryFilter.add(new Option('All Partners', ''));
+    categories.forEach(([label, value]) => categoryFilter.add(new Option(label, value)));
+    categoryLabel.append(categoryFilter);
+    const statusLabel = node('label', 'Partnership activity');
+    const statusFilter = node('select');
+    statusFilter.name = 'status';
+    statusFilter.add(new Option('All activity', ''));
+    statusFilter.add(new Option('Active Partner', 'active'));
+    statusFilter.add(new Option('Inactive / Past Partner', 'inactive'));
+    statusLabel.append(statusFilter);
+    filters.append(searchLabel, categoryLabel, statusLabel);
+
+    const list = node('div', undefined, 'partner-catalog-grid');
     partners.forEach(partner => {
-        const record = node('article', undefined, 'record directory-record');
-        record.dataset.search = `${partner.organization_name} ${partner.organization_category || partner.organization_type} ${partner.official_designation || ''} ${partner.address || ''} ${partner.sectors || ''} ${partner.subcategories || ''}`.toLocaleLowerCase();
-        const info = node('div', undefined, 'record-main');
-        info.append(
-            node('strong', partner.organization_name),
-            node('small', `${partner.organization_category || partner.organization_type} · ${partner.email}`),
-            ...(partner.official_designation ? [node('small', partner.official_designation)] : []),
-            node('small', partner.address || 'Address not provided'),
-            node('small', partner.subcategories || 'No sector subcategories assigned')
+        const category = partner.organization_category || partner.organization_type || 'Other';
+        const active = Number(partner.active_project_count || 0) > 0 || Number(partner.upcoming_event_count || 0) > 0;
+        const searchable = [
+            partner.organization_name, partner.first_name, partner.last_name, partner.official_designation,
+            partner.email, partner.contact_number,
+            partner.address, category, partner.sectors, partner.subcategories
+        ].filter(Boolean).join(' ').toLocaleLowerCase();
+        const card = node('article', undefined, 'partner-catalog-card');
+        card.dataset.search = searchable;
+        card.dataset.category = category;
+        card.dataset.status = active ? 'active' : 'inactive';
+        const cardHeader = node('div', undefined, 'partner-card-header');
+        const initials = partner.organization_name.trim().split(/\s+/).slice(0, 2).map(part => part[0] || '').join('').toLocaleUpperCase();
+        cardHeader.append(node('span', initials || 'P', 'partner-logo-placeholder'));
+        const badges = node('div', undefined, 'partner-card-badges');
+        badges.append(
+            node('span', category.replace(/\s*\(e\.g\.,[^)]*\)/i, ''), 'badge partner-category-badge'),
+            node('span', active ? 'Active partner' : 'Past partner', `badge partner-activity-badge ${active ? 'is-active' : 'is-inactive'}`)
         );
-        record.append(info, node('span', partner.sectors || 'Unclassified', 'badge'));
+        cardHeader.append(badges);
+        const cardInfo = node('div', undefined, 'partner-card-info');
+        cardInfo.append(node('h3', partner.organization_name));
+        const representative = [partner.first_name, partner.last_name].filter(Boolean).join(' ');
+        cardInfo.append(node('p', [representative, partner.official_designation].filter(Boolean).join(' · ') || 'Representative not listed'));
+        const contact = node('div', undefined, 'partner-card-contact');
+        contact.append(
+            node('span', partner.email || 'Email not listed'),
+            node('span', partner.contact_number || 'Phone not listed'),
+            node('span', partner.address || 'Location not listed')
+        );
+        const stats = node('div', undefined, 'partner-card-stats');
+        stats.append(
+            node('div', `${Number(partner.active_project_count || 0)} active · ${Number(partner.completed_project_count || 0)} completed CES projects`, 'partner-card-stat'),
+            node('div', `${Number(partner.upcoming_event_count || 0)} upcoming · ${Number(partner.past_event_count || 0)} past events`, 'partner-card-stat')
+        );
+        const actions = node('div', undefined, 'partner-card-actions');
+        const view = button('View Organization Profile', `viewpartner-${partner.id}`, 'button button-primary button-small');
+        view.addEventListener('click', () => showPartnerProfile(Number(partner.id), sectors));
+        actions.append(view);
+        card.append(cardHeader, cardInfo, contact, stats, actions);
+        list.append(card);
+    });
+
+    const empty = node('div', partners.length ? 'No partners match the selected filters.' : 'No approved partners are listed yet.', 'empty partner-catalog-empty');
+    empty.hidden = partners.length > 0;
+    const applyFilters = () => {
+        const query = search.value.trim().toLocaleLowerCase();
+        let visibleCount = 0;
+        list.querySelectorAll('.partner-catalog-card').forEach(card => {
+            const matches = (!query || card.dataset.search.includes(query))
+                && (!categoryFilter.value || card.dataset.category === categoryFilter.value)
+                && (!statusFilter.value || card.dataset.status === statusFilter.value);
+            card.hidden = !matches;
+            if (matches) visibleCount++;
+        });
+        empty.hidden = visibleCount > 0;
+    };
+    filters.addEventListener('input', applyFilters);
+    filters.addEventListener('change', applyFilters);
+    section.append(toolbar, filters, list, empty);
+    pageContent.append(section);
+}
+
+function openSectorManager(sectors) {
+    document.querySelector('#sector-manager-modal')?.remove();
+    const dialog = node('dialog', undefined, 'sector-manager-modal');
+    dialog.id = 'sector-manager-modal';
+    dialog.setAttribute('aria-labelledby', 'sector-manager-title');
+    const content = node('div', undefined, 'sector-manager-content');
+    const header = node('header', undefined, 'sector-manager-header');
+    const heading = node('div');
+    heading.append(node('p', 'DIRECTORY SETTINGS', 'eyebrow'));
+    const title = node('h2', 'Manage sectors');
+    title.id = 'sector-manager-title';
+    heading.append(title);
+    const close = button('×', 'close-sector-manager', 'button button-quiet sector-manager-close');
+    close.setAttribute('aria-label', 'Close sector manager');
+    header.append(heading, close);
+
+    const forms = node('div', undefined, 'sector-manager-forms');
+    const sectorForm = node('form', undefined, 'sector-manager-form');
+    sectorForm.innerHTML = '<label>New sector<input name="name" maxlength="120" placeholder="e.g., Education and Skills" required></label><button class="button button-primary" type="submit">Add sector</button>';
+    const subcategoryForm = node('form', undefined, 'sector-manager-form');
+    subcategoryForm.innerHTML = '<label>Parent sector<select name="sectorId" required></select></label><label>New subcategory<input name="name" maxlength="120" placeholder="e.g., Digital literacy" required></label><button class="button button-primary" type="submit">Add subcategory</button>';
+    const sectorOptions = new Map();
+    sectors.forEach(item => sectorOptions.set(String(item.sector_id), item.sector_name));
+    Array.from(sectorOptions.entries()).sort((a, b) => a[1].localeCompare(b[1])).forEach(([id, name]) => {
+        subcategoryForm.elements.sectorId.add(new Option(name, id));
+    });
+    const message = node('p', '', 'sector-manager-message');
+    message.hidden = true;
+    const onSubmit = (form, payload, successMessage) => {
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            const submitButton = form.querySelector('button[type="submit"]');
+            submitButton.disabled = true;
+            try {
+                await request('/directory', { method: 'POST', body: JSON.stringify(payload(form)) });
+                dialog.close();
+                await renderPage('directory');
+                showMessage(pageMessage, successMessage);
+            } catch (error) {
+                message.textContent = error.message;
+                message.className = 'sector-manager-message is-error';
+                message.hidden = false;
+            } finally {
+                submitButton.disabled = false;
+            }
+        });
+    };
+    onSubmit(sectorForm, form => ({ type: 'sector', name: form.elements.name.value }), 'Sector added.');
+    onSubmit(subcategoryForm, form => ({
+        type: 'subcategory',
+        sectorId: form.elements.sectorId.value,
+        name: form.elements.name.value
+    }), 'Subcategory added.');
+    forms.append(sectorForm, subcategoryForm);
+
+    const list = node('section', undefined, 'sector-manager-list');
+    list.append(node('h3', 'Current sectors and subcategories'));
+    const grouped = new Map();
+    sectors.forEach(item => {
+        const key = String(item.sector_id);
+        if (!grouped.has(key)) grouped.set(key, { name: item.sector_name, subcategories: [] });
+        if (item.subcategory_name) grouped.get(key).subcategories.push(item.subcategory_name);
+    });
+    if (!grouped.size) {
+        list.append(node('p', 'No sectors have been created yet.'));
+    } else {
+        grouped.forEach(group => {
+            const row = node('div', undefined, 'sector-manager-row');
+            row.append(node('strong', group.name), node('span', group.subcategories.join(' · ') || 'No subcategories'));
+            list.append(row);
+        });
+    }
+    const footer = node('footer', undefined, 'sector-manager-footer');
+    const done = button('Done', 'close-sector-manager', 'button button-quiet');
+    footer.append(done);
+    content.append(header, message, forms, list, footer);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="close-sector-manager"]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+}
+
+async function showPartnerProfile(partnerId, sectors) {
+    try {
+        const { partner, projects } = await request(`/directory/${partnerId}`);
+        document.querySelector('#partner-profile-modal')?.remove();
+        const dialog = node('dialog', undefined, 'partner-profile-modal');
+        dialog.id = 'partner-profile-modal';
+        dialog.setAttribute('aria-labelledby', 'partner-profile-title');
+        const content = node('div', undefined, 'partner-profile-content');
+        const header = node('header', undefined, 'partner-profile-header');
+        const heading = node('div', undefined, 'partner-profile-heading');
+        const eyebrow = node('p', 'PARTNER ORGANIZATION', 'eyebrow');
+        const title = node('h2', partner.organization_name);
+        title.id = 'partner-profile-title';
+        const meta = node('div', undefined, 'partner-profile-meta');
+        meta.append(
+            node('span', partner.organization_category || partner.organization_type, 'badge partner-category-badge'),
+            node('span', partner.sectors || 'Unclassified')
+        );
+        heading.append(eyebrow, title, meta);
+        const close = button('×', 'close-partner-profile', 'button button-quiet partner-profile-close');
+        close.setAttribute('aria-label', 'Close organization profile');
+        header.append(heading, close);
+
+        const body = node('div', undefined, 'partner-profile-body');
+        const details = node('section', undefined, 'partner-profile-section');
+        details.append(node('h3', 'Organization details'));
+        const detailGrid = node('dl', undefined, 'partner-profile-detail-grid');
+        [
+            ['Category', partner.organization_category || partner.organization_type || 'Not listed'],
+            ['Sector tags', partner.subcategories || partner.sectors || 'Not classified'],
+            ['Representative', [partner.first_name, partner.last_name].filter(Boolean).join(' ') || 'Not listed'],
+            ['Designation', partner.official_designation || 'Not listed'],
+            ['Email', partner.email || 'Not listed'],
+            ['Phone', partner.contact_number || 'Not listed'],
+            ['Location', partner.address || 'Not listed'],
+            ['Account status', partner.account_status || 'approved']
+        ].forEach(([label, value]) => {
+            detailGrid.append(node('dt', label), node('dd', value));
+        });
+        details.append(detailGrid);
+
+        const verification = node('section', undefined, 'partner-profile-section');
+        verification.append(node('h3', 'Verification & agreements'));
+        const signedMoa = projects.reduce((sum, project) => sum + Number(project.signed_moa_count || 0), 0);
+        const signedMou = projects.reduce((sum, project) => sum + Number(project.signed_mou_count || 0), 0);
+        verification.append(
+            node('p', partner.verification_available ? 'Organization verification document is on file.' : 'No organization verification document is on file.'),
+            node('p', `${signedMoa} signed MOA · ${signedMou} signed MOU across approved collaborations.`)
+        );
+        if (currentUser.role === 'admin' && partner.verification_available) {
+            const proof = node('a', 'View verification document', 'button button-quiet button-small');
+            proof.href = `api/accounts/${partner.id}/proof`;
+            proof.target = '_blank';
+            proof.rel = 'noopener';
+            verification.append(proof);
+        }
+
+        const collaborations = node('section', undefined, 'partner-profile-section');
+        collaborations.append(node('h3', 'CES proposals & events'));
+        if (!projects.length) {
+            collaborations.append(node('p', 'No approved or active co-hosted projects yet.'));
+        } else {
+            const projectList = node('div', undefined, 'partner-project-list');
+            projects.forEach(project => {
+                const card = node('article', undefined, 'partner-project-card');
+                const projectTitle = node('div', undefined, 'partner-project-title');
+                projectTitle.append(
+                    node('strong', project.title),
+                    node('span', project.status.replaceAll('_', ' '), `badge proposal-status status-${project.status}`)
+                );
+                const dates = project.period_start
+                    ? `${project.period_start}${project.period_end ? ` to ${project.period_end}` : ''}`
+                    : 'Dates not scheduled';
+                card.append(projectTitle, node('p', dates), node('small', project.events || 'No linked events yet.'));
+                projectList.append(card);
+            });
+            collaborations.append(projectList);
+        }
+        body.append(details, verification, collaborations);
+
         if (currentUser.role === 'admin') {
-            const edit = node('form', undefined, 'directory-assignment-form');
+            const manage = node('details', undefined, 'partner-profile-admin');
+            manage.append(node('summary', 'Edit organization profile and sectors'));
+            const form = node('form', undefined, 'partner-profile-edit-form');
             const nameLabel = node('label', 'Organization name');
             const nameInput = node('input');
             nameInput.name = 'organizationName';
@@ -1463,28 +1677,31 @@ async function renderDirectory() {
             ].forEach(category => typeSelect.add(new Option(category, category)));
             typeSelect.value = partner.organization_category || 'Other';
             typeLabel.append(typeSelect);
-            const addressLabel = node('label', 'Address');
+            const addressLabel = node('label', 'Location / address');
             const addressInput = node('input');
             addressInput.name = 'address';
             addressInput.maxLength = 500;
             addressInput.value = partner.address || '';
             addressLabel.append(addressInput);
-            const label = node('label', 'Subcategories');
-            const select = node('select');
-            select.name = 'subcategoryIds';
-            select.multiple = true;
+            const subcategoryLabel = node('label', 'Sector subcategories');
+            const subcategorySelect = node('select');
+            subcategorySelect.name = 'subcategoryIds';
+            subcategorySelect.multiple = true;
+            subcategorySelect.size = Math.min(6, Math.max(3, sectors.filter(item => item.subcategory_id !== null).length));
             const assigned = new Set((partner.subcategory_ids || '').split(',').filter(Boolean));
             sectors.filter(item => item.subcategory_id !== null).forEach(item => {
                 const option = new Option(`${item.sector_name} / ${item.subcategory_name}`, item.subcategory_id);
                 option.selected = assigned.has(String(item.subcategory_id));
-                select.add(option);
+                subcategorySelect.add(option);
             });
-            label.append(select);
-            const save = node('button', 'Save organization profile', 'button button-quiet button-small');
+            subcategoryLabel.append(subcategorySelect);
+            const save = button('Save profile', '', 'button button-primary button-small');
+            save.removeAttribute('data-action');
             save.type = 'submit';
-            edit.append(nameLabel, typeLabel, addressLabel, label, save);
-            edit.addEventListener('submit', async event => {
+            form.append(nameLabel, typeLabel, addressLabel, subcategoryLabel, save);
+            form.addEventListener('submit', async event => {
                 event.preventDefault();
+                save.disabled = true;
                 try {
                     await request(`/directory/${partner.id}`, {
                         method: 'PUT',
@@ -1492,34 +1709,51 @@ async function renderDirectory() {
                             organizationName: nameInput.value,
                             organizationCategory: typeSelect.value,
                             address: addressInput.value,
-                            subcategoryIds: Array.from(select.selectedOptions, option => option.value)
+                            subcategoryIds: Array.from(subcategorySelect.selectedOptions, option => option.value)
                         })
                     });
+                    dialog.close();
                     await renderPage('directory');
                     showMessage(pageMessage, 'Partner organization profile and classifications updated.');
                 } catch (error) {
-                    showMessage(pageMessage, error.message, 'error');
+                    let errorNotice = form.querySelector('.partner-profile-error');
+                    if (!errorNotice) {
+                        errorNotice = node('p', undefined, 'partner-profile-error notice error');
+                        form.prepend(errorNotice);
+                    }
+                    errorNotice.textContent = error.message;
+                } finally {
+                    save.disabled = false;
                 }
             });
-            record.append(edit);
+            body.append(manage, form);
         }
-        list.append(record);
-    });
-    filters.addEventListener('input', () => {
-        const search = filters.querySelector('[name="search"]').value.trim().toLocaleLowerCase();
-        let visible = 0;
-        list.querySelectorAll('.directory-record').forEach(record => {
-            record.hidden = Boolean(search) && !record.dataset.search.includes(search);
-            if (!record.hidden) visible++;
+        const footer = node('footer', undefined, 'partner-profile-footer');
+        footer.append(button('Close', 'close-partner-profile', 'button button-quiet'));
+        content.append(header, body, footer);
+        dialog.append(content);
+        dialog.addEventListener('click', event => {
+            if (event.target === dialog || event.target.closest('[data-action="close-partner-profile"]')) dialog.close();
         });
-        empty.hidden = visible > 0;
-    });
-    const empty = node('div', 'No organizations match your search.', 'empty');
-    empty.hidden = true;
-    pageContent.append(filters, list, empty);
+        dialog.addEventListener('close', () => dialog.remove(), { once: true });
+        document.body.append(dialog);
+        dialog.showModal();
+    } catch (error) {
+        showMessage(pageMessage, error.message, 'error');
+    }
 }
 
 async function renderEvents() {
+    if (currentUser.role === 'admin') {
+        const month = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Manila',
+            year: 'numeric',
+            month: '2-digit'
+        }).format(new Date());
+        const dashboard = await request(`/events/admin-dashboard?month=${encodeURIComponent(month)}`);
+        renderAdminEventsDashboard(dashboard);
+        return;
+    }
     if (currentUser.role === 'partner') {
         const section = panel('Schedule an event', 'Create event dates and at least one activity for each date. Events require an approved project.');
         const form = node('form', undefined, 'panel-form');
@@ -1629,6 +1863,253 @@ async function renderEvents() {
     if (currentUser.role === 'partner') {
         await renderPartnerEventsDashboard(events);
     }
+}
+
+function renderAdminEventsDashboard(data) {
+    const metrics = node('section', undefined, 'admin-event-metrics');
+    [
+        ['scheduled_events', 'Scheduled / Ongoing Events', data.metrics.scheduled_events, 'Events with dates today or ahead'],
+        ['registered_volunteers', 'Registered Volunteers', data.metrics.registered_volunteers, 'Unique applicants across active programs'],
+        ['attendance_headcount', 'Attendance Headcount', data.metrics.attendance_headcount, 'Volunteers present and community participants'],
+        ['completed_programs', 'Completed Programs', data.metrics.completed_programs, 'All scheduled event dates have passed']
+    ].forEach(([key, label, value, hint]) => {
+        const card = node('article', undefined, 'admin-event-metric');
+        card.dataset.metric = key;
+        card.append(node('span', label), node('strong', Number(value || 0).toLocaleString()), node('small', hint));
+        metrics.append(card);
+    });
+    pageContent.append(metrics);
+
+    const calendarPanel = panel('Calendar of Events', 'Approved and active university and partner extension activities.');
+    calendarPanel.classList.add('admin-event-calendar-panel');
+    const calendar = node('div', undefined, 'admin-event-calendar');
+    calendarPanel.append(calendar);
+    pageContent.append(calendarPanel);
+
+    const volunteerPanel = panel('Volunteer Applications', 'Review registrations and volunteer affiliations for each community project.');
+    volunteerPanel.classList.add('admin-volunteer-review-panel');
+    const volunteerList = node('div', undefined, 'admin-volunteer-review-list');
+    if (!data.events.length) volunteerList.append(node('div', 'No approved or active events are available.', 'empty'));
+    data.events.forEach(item => {
+        const record = node('article', undefined, 'admin-volunteer-review-row');
+        const info = node('div', undefined, 'record-main');
+        info.append(node('strong', item.title), node('small', `${item.project_title} · ${item.partner_name || 'UCC / University program'}`));
+        record.append(info, button('Review volunteers', `applications-${item.id}`, 'button button-quiet button-small'));
+        volunteerList.append(record);
+    });
+    volunteerPanel.append(volunteerList);
+    pageContent.append(volunteerPanel);
+
+    const eventsPanel = panel('Event Management', 'Filter the university-wide event register and open attendance or volunteer records.');
+    eventsPanel.classList.add('admin-event-management-panel');
+    const toolbar = node('div', undefined, 'admin-event-filter-toolbar');
+    const searchLabel = node('label', 'Search events, programs, or partners');
+    const search = node('input');
+    search.type = 'search';
+    search.name = 'search';
+    search.placeholder = 'Search by event, program, partner, or department';
+    searchLabel.append(search);
+    const statusLabel = node('label', 'Event status');
+    const status = node('select');
+    [['all', 'All statuses'], ['upcoming', 'Upcoming'], ['ongoing', 'Ongoing'], ['completed', 'Completed']].forEach(([value, label]) => status.add(new Option(label, value)));
+    statusLabel.append(status);
+    const partnerLabel = node('label', 'Partner / Department');
+    const partner = node('select');
+    partner.add(new Option('All partners / departments', ''));
+    [...new Set(data.events.map(item => item.partner_name).filter(Boolean).flatMap(name => name.split(', ')))].sort((a, b) => a.localeCompare(b))
+        .forEach(name => partner.add(new Option(name, name)));
+    partnerLabel.append(partner);
+    toolbar.append(searchLabel, statusLabel, partnerLabel);
+    const tableWrap = node('div', undefined, 'admin-event-table-wrap');
+    const table = node('table', undefined, 'admin-event-table');
+    table.innerHTML = '<thead><tr><th>Event / Program</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Attendance</th><th>Status</th><th>Actions</th></tr></thead>';
+    const tbody = node('tbody');
+    table.append(tbody);
+    tableWrap.append(table);
+    eventsPanel.append(toolbar, tableWrap);
+    pageContent.append(eventsPanel);
+
+    const renderRows = () => {
+        tbody.replaceChildren();
+        const query = search.value.trim().toLocaleLowerCase();
+        const selectedPartner = partner.value;
+        const filtered = data.events.filter(item => {
+            const matchesText = !query || `${item.title} ${item.project_title} ${item.partner_name || ''}`.toLocaleLowerCase().includes(query);
+            const matchesStatus = status.value === 'all' || item.event_status === status.value;
+            const matchesPartner = !selectedPartner || (item.partner_name || '').split(', ').includes(selectedPartner);
+            return matchesText && matchesStatus && matchesPartner;
+        });
+        if (!filtered.length) {
+            const row = node('tr');
+            const cell = node('td', 'No events match the selected filters.', 'admin-event-empty');
+            cell.colSpan = 8;
+            row.append(cell);
+            tbody.append(row);
+            return;
+        }
+        filtered.forEach(item => {
+            const row = node('tr');
+            const eventCell = node('td', undefined, 'admin-event-name');
+            eventCell.append(node('strong', item.title), node('small', item.project_title));
+            const partnerCell = node('td', item.partner_name || 'UCC / University program');
+            const dateStart = item.date_start ? dashboardDate(item.date_start, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+            const dateEnd = item.date_end ? dashboardDate(item.date_end, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+            const scheduleCell = node('td', undefined, 'admin-event-schedule');
+            scheduleCell.append(
+                node('span', dateStart ? (dateStart === dateEnd ? dateStart : `${dateStart} – ${dateEnd}`) : 'No event dates'),
+                node('small', item.start_time ? `${String(item.start_time).slice(0, 5)} – ${String(item.end_time || '').slice(0, 5)}` : 'Time not set')
+            );
+            const venueCell = node('td', item.venues || 'Venue not set', 'admin-event-venue');
+            const volunteers = Number(item.registered_volunteers || 0);
+            const attendance = Number(item.attendance_headcount || 0);
+            const statusBadge = node('span', item.event_status, `badge status-badge event-status-${item.event_status}`);
+            const actions = node('div', undefined, 'admin-event-actions');
+            actions.append(
+                button('View Attendance Log', `dates-${item.id}`, 'button button-quiet button-small'),
+                button('Manage Volunteers', `applications-${item.id}`, 'button button-quiet button-small'),
+                button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'),
+                button('Print / PDF', `attendanceprint-${item.id}`, 'button button-quiet button-small')
+            );
+            row.append(
+                eventCell,
+                partnerCell,
+                scheduleCell,
+                venueCell,
+                node('td', volunteers.toLocaleString()),
+                node('td', attendance.toLocaleString()),
+                node('td', undefined, 'admin-event-status-cell'),
+                node('td', undefined, 'admin-event-action-cell')
+            );
+            row.children[6].append(statusBadge);
+            row.children[7].append(actions);
+            row.dataset.eventId = item.id;
+            tbody.append(row);
+        });
+    };
+    search.addEventListener('input', renderRows);
+    [status, partner].forEach(select => select.addEventListener('change', renderRows));
+    renderRows();
+    renderAdminEventCalendar(calendar, data.month, data.calendar);
+}
+
+async function refreshAdminEventSummary() {
+    if (currentUser.role !== 'admin') return;
+    const month = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Manila',
+        year: 'numeric',
+        month: '2-digit'
+    }).format(new Date());
+    const data = await request(`/events/admin-dashboard?month=${encodeURIComponent(month)}`);
+    Object.entries(data.metrics).forEach(([key, value]) => {
+        const card = pageContent.querySelector(`.admin-event-metric[data-metric="${key}"]`);
+        if (card) card.querySelector('strong').textContent = Number(value || 0).toLocaleString();
+    });
+    data.events.forEach(item => {
+        const row = pageContent.querySelector(`.admin-event-table tr[data-event-id="${item.id}"]`);
+        if (!row) return;
+        row.children[4].textContent = Number(item.registered_volunteers || 0).toLocaleString();
+        row.children[5].textContent = Number(item.attendance_headcount || 0).toLocaleString();
+    });
+}
+
+function showAdminCalendarEvent(item) {
+    document.querySelector('#admin-calendar-event-modal')?.remove();
+    const dialog = node('dialog', undefined, 'admin-calendar-event-modal');
+    dialog.id = 'admin-calendar-event-modal';
+    dialog.setAttribute('aria-labelledby', 'admin-calendar-event-title');
+    const content = node('div', undefined, 'admin-calendar-event-content');
+    const header = node('header', undefined, 'admin-calendar-event-header');
+    const heading = node('div');
+    heading.append(node('p', 'COMMUNITY EXTENSION EVENT', 'eyebrow'));
+    const title = node('h2', item.title);
+    title.id = 'admin-calendar-event-title';
+    const status = node('span', item.event_status, `badge status-badge event-status-${item.event_status}`);
+    heading.append(title, status);
+    const close = button('×', 'close-admin-event-summary', 'button button-quiet admin-calendar-event-close');
+    close.setAttribute('aria-label', 'Close event details');
+    header.append(heading, close);
+
+    const date = dashboardDate(item.event_date, { month: 'long', day: 'numeric', year: 'numeric' });
+    const time = item.start_time ? `${String(item.start_time).slice(0, 5)} – ${String(item.end_time || '').slice(0, 5)}` : 'Time not set';
+    const details = node('dl', undefined, 'admin-calendar-event-details');
+    [
+        ['Project', item.project_title || '—'],
+        ['Date & time', `${date} · ${time}`],
+        ['Venue / location', item.venues || 'Venue not set'],
+        ['Host partners / departments', item.partner_name || 'UCC / University program'],
+        ['Registered volunteers', Number(item.registered_volunteers || 0).toLocaleString()],
+        ['Attendance headcount', Number(item.attendance_headcount || 0).toLocaleString()]
+    ].forEach(([label, value]) => {
+        details.append(node('dt', label), node('dd', value));
+    });
+    const footer = node('footer', undefined, 'admin-calendar-event-footer');
+    const attendance = button('View full attendance logs', `calendar-event-attendance-${item.id}`, 'button button-primary');
+    const done = button('Close', 'close-admin-event-summary', 'button button-quiet');
+    footer.append(attendance, done);
+    content.append(header, details, footer);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="close-admin-event-summary"]')) dialog.close();
+        if (event.target.closest(`[data-action="calendar-event-attendance-${item.id}"]`)) {
+            dialog.close();
+            showDates(Number(item.id)).catch(error => showMessage(pageMessage, error.message, 'error'));
+        }
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+}
+
+function renderAdminEventCalendar(container, month, events) {
+    const [year, monthNumber] = month.split('-').map(Number);
+    const first = new Date(year, monthNumber - 1, 1);
+    const daysInMonth = new Date(year, monthNumber, 0).getDate();
+    const eventsByDate = new Map();
+    events.forEach(item => {
+        const entries = eventsByDate.get(item.event_date) || [];
+        entries.push(item);
+        eventsByDate.set(item.event_date, entries);
+    });
+    const toolbar = node('div', undefined, 'admin-event-calendar-toolbar');
+    const previous = button('Previous month', 'admin-calendar-previous', 'button button-quiet button-small');
+    const next = button('Next month', 'admin-calendar-next', 'button button-quiet button-small');
+    toolbar.append(previous, node('h3', new Intl.DateTimeFormat('en-PH', { month: 'long', year: 'numeric' }).format(first)), next);
+    const grid = node('div', undefined, 'admin-event-calendar-grid');
+    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(label => grid.append(node('div', label, 'admin-event-calendar-weekday')));
+    for (let i = 0; i < first.getDay(); i++) grid.append(node('div', undefined, 'admin-event-calendar-day is-outside'));
+    for (let day = 1; day <= daysInMonth; day++) {
+        const date = `${month}-${String(day).padStart(2, '0')}`;
+        const cell = node('div', undefined, 'admin-event-calendar-day');
+        cell.append(node('span', day, 'admin-event-calendar-day-number'));
+        (eventsByDate.get(date) || []).forEach(item => {
+            const eventButton = button('', `admin-calendar-event-${item.id}`, `admin-event-calendar-event event-status-${item.event_status}`);
+            eventButton.append(
+                node('span', item.title, 'admin-event-calendar-title'),
+                node('span', item.event_status, 'admin-event-calendar-status')
+            );
+            eventButton.title = `${item.project_title}${item.partner_name ? ` · ${item.partner_name}` : ''} · ${item.event_status}`;
+            eventButton.addEventListener('click', event => {
+                event.stopPropagation();
+                showAdminCalendarEvent(item).catch(error => showMessage(pageMessage, error.message, 'error'));
+            });
+            cell.append(eventButton);
+        });
+        grid.append(cell);
+    }
+    while ((grid.children.length - 7) % 7 !== 0) grid.append(node('div', undefined, 'admin-event-calendar-day is-outside'));
+    container.replaceChildren(toolbar, grid);
+    const changeMonth = async offset => {
+        const changed = new Date(year, monthNumber - 1 + offset, 1);
+        const nextMonth = `${changed.getFullYear()}-${String(changed.getMonth() + 1).padStart(2, '0')}`;
+        try {
+            const result = await request(`/events/admin-dashboard?month=${encodeURIComponent(nextMonth)}`);
+            renderAdminEventCalendar(container, result.month, result.calendar);
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        }
+    };
+    previous.addEventListener('click', () => changeMonth(-1));
+    next.addEventListener('click', () => changeMonth(1));
 }
 
 async function renderPartnerEventsDashboard(events) {
@@ -1799,6 +2280,34 @@ async function downloadPartnerAttendance(eventId) {
     link.download = `ucc-ces-event-${eventId}-attendance.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function printEventAttendanceReport(eventId) {
+    const reportWindow = window.open('', '_blank');
+    if (!reportWindow) throw new Error('Allow pop-ups to open the printable attendance report.');
+    try {
+        const [{ events }, { dates }] = await Promise.all([request('/events'), request(`/events/${eventId}/dates`)]);
+        const event = events.find(item => Number(item.id) === eventId);
+        if (!event) throw new Error('The selected event could not be found.');
+        const sections = [];
+        for (const date of dates) {
+            const { attendance } = await request(`/event-dates/${date.id}/attendance`);
+            const rows = attendance.map(item => `<tr><td>${escapeReportText(`${item.first_name} ${item.last_name}`)}</td><td>${escapeReportText(item.affiliation || '—')}</td><td>${escapeReportText(item.attendance_status || 'Not recorded')}</td><td>${escapeReportText(item.scanned_at || '—')}</td><td>${escapeReportText(item.attendance_note || '')}</td></tr>`).join('');
+            sections.push(`<section><h2>${escapeReportText(date.event_date)}</h2><table><thead><tr><th>Volunteer</th><th>Affiliation</th><th>Attendance status</th><th>Recorded at</th><th>Note</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No approved volunteer attendance records.</td></tr>'}</tbody></table></section>`);
+        }
+        const safeTitle = escapeReportText(event.title);
+        reportWindow.document.write(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${safeTitle} attendance report</title><style>body{font:14px Arial,sans-serif;color:#183a2a;margin:32px}h1{font-size:22px}h2{font-size:16px;margin-top:28px}p{color:#56675e}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #cddbd1;padding:8px;text-align:left;font-size:12px}th{background:#edf5ef}@media print{body{margin:14mm}}</style></head><body><h1>${safeTitle}</h1><p>${escapeReportText(event.project_title)} · UCC-CES Attendance Report</p>${sections.join('')}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`);
+        reportWindow.document.close();
+    } catch (error) {
+        reportWindow.close();
+        throw error;
+    }
+}
+
+function escapeReportText(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[character]);
 }
 
 function addEventDateEditor(container) {
@@ -2284,9 +2793,7 @@ pageContent.addEventListener('click', async event => {
     actionButton.disabled = true;
     try {
         if (action === 'submit') {
-            await request(`/proposals/${id}/submit`, { method: 'POST', body: '{}' });
-            showMessage(pageMessage, 'Proposal submitted for review.');
-            await renderPage('proposals');
+            await openSubmitConfirmation(Number(id));
         } else if (action === 'review') {
             const proposalId = actionButton.dataset.action.split('-')[1];
             const decision = actionButton.dataset.action.substring(`review-${proposalId}-`.length);
@@ -2309,7 +2816,7 @@ pageContent.addEventListener('click', async event => {
             showMessage(pageMessage, 'Application submitted for organizer review.');
             await renderPage('events');
         } else if (action === 'upload') {
-            openDocumentForm(Number(id));
+            await openDocumentForm(Number(id));
         } else if (action === 'dates') {
             await showDates(Number(id));
         } else if (action === 'applications') {
@@ -2318,6 +2825,8 @@ pageContent.addEventListener('click', async event => {
             await showPartnerEventAttendees(Number(id));
         } else if (action === 'attendexport') {
             await downloadPartnerAttendance(Number(id));
+        } else if (action === 'attendanceprint') {
+            await printEventAttendanceReport(Number(id));
         } else if (action === 'attendance' && id === 'list') {
             await showDateAttendance(Number(value));
         } else if (action === 'attendance' && id !== 'list') {
@@ -2331,6 +2840,7 @@ pageContent.addEventListener('click', async event => {
                 })
             });
             await showDateAttendance(Number(actionButton.dataset.eventDateId));
+            await refreshAdminEventSummary();
         } else if (action === 'participants') {
             await showParticipantCounts(Number(id));
         } else if (action === 'certificates') {
@@ -2341,6 +2851,7 @@ pageContent.addEventListener('click', async event => {
             await request(`/applications/${applicationId}/review`, { method: 'POST', body: JSON.stringify({ status }) });
             showMessage(pageMessage, `Application ${status}.`);
             await showApplications(Number(actionButton.dataset.eventId));
+            await refreshAdminEventSummary();
         } else if (action === 'export') {
             await exportReport(actionButton.dataset.format || 'csv');
         } else if (action === 'camera') {
@@ -2361,133 +2872,338 @@ pageContent.addEventListener('click', async event => {
     }
 });
 
-function openDocumentForm(proposalId) {
+async function loadProposalDocuments(proposalId) {
+    return request(`/proposals/${proposalId}/documents`);
+}
+
+function proposalDocumentSlots() {
+    return [
+        { type: 'signed_proposal_letter', key: 'signed_proposal_letter', title: 'Signed Proposal Letter', required: true, signed: true },
+        { type: 'project_brief', key: 'project_brief', title: 'Project Brief Document', required: true, signed: false },
+        { type: 'moa', key: 'signed_moa_mou', title: 'Signed MOA / MOU', required: true, signed: true },
+        { type: 'other', key: 'other', title: 'Other Supporting Attachments', required: false, signed: false }
+    ];
+}
+
+function proposalDocumentForSlot(documents, slot) {
+    const matching = documents.filter(document => {
+        if (slot.key === 'signed_moa_mou') return ['moa', 'mou'].includes(document.document_type);
+        if (slot.key === 'other') return ['other', 'narrative_report'].includes(document.document_type);
+        return document.document_type === slot.type;
+    });
+    return matching.find(document => !slot.signed || Number(document.is_signed) === 1) || matching[0];
+}
+
+function updateProposalAttachmentCount(proposalId, attachmentCount) {
+    const uploadButton = pageContent.querySelector(`tr [data-action="upload-${proposalId}"]`);
+    const row = uploadButton?.closest('tr');
+    const count = row?.querySelector('[data-attachment-count]');
+    if (count) count.textContent = `${Number(attachmentCount)} document(s) attached`;
+}
+
+async function openDocumentForm(proposalId, { focusSlot = null } = {}) {
     document.querySelector('#proposal-upload-modal')?.remove();
+    let documentState;
+    try {
+        documentState = await loadProposalDocuments(proposalId);
+    } catch (error) {
+        showMessage(pageMessage, error.message, 'error');
+        return;
+    }
+
     const dialog = node('dialog', undefined, 'proposal-upload-modal');
     dialog.id = 'proposal-upload-modal';
     dialog.setAttribute('aria-labelledby', 'proposal-upload-title');
-    dialog.innerHTML = `
-        <div class="proposal-upload-content">
-            <header class="proposal-upload-header">
-                <div>
-                    <p class="eyebrow">PROPOSAL DOCUMENTS</p>
-                    <h2 id="proposal-upload-title">Upload Proposal Document</h2>
-                    <p>Signed proposal letter, project brief, and signed MOA or MOU are required before submission.</p>
-                </div>
-                <button type="button" class="button button-quiet button-small" data-upload-close aria-label="Close upload dialog">Close</button>
-            </header>
-            <div class="proposal-upload-message" role="status" aria-live="polite" hidden></div>
-            <form class="proposal-upload-form">
-                <label>Document Type
-                    <select name="documentType" required>
-                        <option value="signed_proposal_letter">Signed Proposal Letter</option>
-                        <option value="project_brief">Project Brief</option>
-                        <option value="moa">Signed MOA / MOU</option>
-                        <option value="other">Other Supporting Documents</option>
-                    </select>
-                </label>
-                <label class="proposal-file-drop" data-file-drop>
-                    <span class="proposal-file-drop-title">Choose a file or drag it here</span>
-                    <span class="proposal-file-name" data-file-name>PDF, DOCX, PNG, or JPG · up to 10 MB</span>
-                    <input name="file" type="file" accept=".pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg" required>
-                </label>
-                <label class="proposal-signed-toggle"><input name="isSigned" type="checkbox" value="1" checked> This document is signed</label>
-                <label>Document Description / Remarks (Optional)
-                    <input name="description" type="text" maxlength="500" placeholder="Add a short note about this document">
-                </label>
-                <div class="proposal-upload-actions">
-                    <button type="button" class="button button-quiet" data-upload-close>Cancel</button>
-                    <button type="submit" class="button button-primary">Upload File</button>
-                </div>
-            </form>
-        </div>`;
-    const form = dialog.querySelector('form');
-    const fileInput = form.elements.file;
-    const fileName = dialog.querySelector('[data-file-name]');
-    const fileDrop = dialog.querySelector('[data-file-drop]');
-    const modalMessage = dialog.querySelector('.proposal-upload-message');
+    const content = node('div', undefined, 'proposal-upload-content');
+    const header = node('header', undefined, 'proposal-upload-header');
+    const heading = node('div');
+    heading.append(
+        node('p', 'PROPOSAL DOCUMENTS', 'eyebrow'),
+        node('h2', 'Upload Proposal Documents'),
+        node('p', 'Attach each required document to this proposal. Signed documents must be marked signed to meet submission requirements.')
+    );
+    heading.querySelector('h2').id = 'proposal-upload-title';
+    const closeButton = button('×', 'close-document-upload', 'button button-quiet button-small proposal-upload-close');
+    closeButton.setAttribute('aria-label', 'Close upload dialog');
+    header.append(heading, closeButton);
+    const message = node('div', '', 'proposal-upload-message');
+    message.setAttribute('role', 'status');
+    message.setAttribute('aria-live', 'polite');
+    message.hidden = true;
+    const slots = node('div', undefined, 'proposal-document-slots');
     const row = pageContent.querySelector(`tr [data-action="upload-${proposalId}"]`)?.closest('tr');
+
     const closeDialog = () => {
         if (dialog.open) dialog.close();
         dialog.remove();
     };
-    dialog.querySelectorAll('[data-upload-close]').forEach(close => close.addEventListener('click', closeDialog));
     dialog.addEventListener('click', event => {
-        if (event.target === dialog) closeDialog();
+        if (event.target === dialog || event.target.closest('[data-action="close-document-upload"]')) closeDialog();
     });
     dialog.addEventListener('cancel', event => {
         event.preventDefault();
         closeDialog();
     });
-    fileInput.addEventListener('change', () => {
-        const file = fileInput.files[0];
-        fileName.textContent = file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : 'PDF, DOCX, PNG, or JPG · up to 10 MB';
-    });
-    ['dragenter', 'dragover'].forEach(type => fileDrop.addEventListener(type, event => {
-        event.preventDefault();
-        fileDrop.classList.add('is-dragging');
-    }));
-    ['dragleave', 'drop'].forEach(type => fileDrop.addEventListener(type, event => {
-        event.preventDefault();
-        fileDrop.classList.remove('is-dragging');
-    }));
-    fileDrop.addEventListener('drop', event => {
-        const [file] = event.dataTransfer.files;
-        if (file) {
+
+    const renderSlot = (slot, currentState) => {
+        const currentDocuments = currentState.documents;
+        const existing = proposalDocumentForSlot(currentDocuments, slot);
+        const isReady = Boolean(currentState.readiness[slot.key]);
+        const card = node('section', undefined, `proposal-document-slot${isReady ? ' is-attached' : slot.required ? ' is-missing' : ''}`);
+        card.dataset.documentSlot = slot.key;
+        const slotHeading = node('div', undefined, 'proposal-document-slot-heading');
+        const label = node('div', undefined, 'proposal-document-slot-label');
+        label.append(node('strong', slot.title));
+        if (slot.required) label.append(node('span', 'Required', 'proposal-document-required'));
+        else label.append(node('span', 'Optional', 'proposal-document-optional'));
+        const statusText = isReady ? 'Complete' : existing && slot.signed ? 'Needs signature' : existing ? 'Attached' : slot.required ? 'Missing' : 'Optional';
+        const status = node('span', statusText, `proposal-document-status${isReady ? ' is-attached' : slot.required ? ' is-missing' : ''}`);
+        slotHeading.append(label, status);
+        card.append(slotHeading);
+
+        if (existing) {
+            const attached = node('div', undefined, 'proposal-document-attached');
+            attached.append(
+                node('span', isReady ? '✓' : '!', `proposal-document-check${isReady ? '' : ' is-pending'}`),
+                node('span', `File attached: ${existing.original_name}${Number(existing.is_signed) ? ' · signed' : ''}`)
+            );
+            card.append(attached);
+        }
+
+        const form = node('form', undefined, 'proposal-slot-upload-form');
+        const fileDrop = node('label', undefined, 'proposal-file-drop');
+        fileDrop.dataset.fileDrop = '';
+        fileDrop.append(
+            node('span', 'Choose a file or drag here', 'proposal-file-drop-title'),
+            node('span', 'PDF, DOCX, PNG, or JPG · up to 10 MB', 'proposal-file-name')
+        );
+        const input = node('input');
+        input.type = 'file';
+        input.name = 'file';
+        input.required = true;
+        input.accept = '.pdf,.docx,.png,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg';
+        fileDrop.append(input);
+        form.append(fileDrop);
+
+        const options = node('div', undefined, 'proposal-slot-options');
+        if (slot.key === 'signed_moa_mou') {
+            const agreementLabel = node('label', 'Agreement type');
+            const agreement = node('select');
+            agreement.name = 'agreementType';
+            agreement.add(new Option('MOA', 'moa'));
+            agreement.add(new Option('MOU', 'mou'));
+            agreementLabel.append(agreement);
+            options.append(agreementLabel);
+        }
+        if (slot.signed) {
+            const signedLabel = node('label', 'This document is signed');
+            const signed = node('input');
+            signed.type = 'checkbox';
+            signed.name = 'isSigned';
+            signed.checked = true;
+            signedLabel.prepend(signed);
+            options.append(signedLabel);
+        }
+        const remarks = node('input');
+        remarks.type = 'text';
+        remarks.name = 'description';
+        remarks.maxLength = 500;
+        remarks.placeholder = 'Optional remarks';
+        const remarksLabel = node('label', 'Remarks');
+        remarksLabel.append(remarks);
+        options.append(remarksLabel);
+        const submit = node('button', existing ? 'Replace file' : 'Upload file', 'button button-primary button-small');
+        submit.type = 'submit';
+        options.append(submit);
+        form.append(options);
+
+        const fileName = fileDrop.querySelector('.proposal-file-name');
+        const fileInput = input;
+        fileInput.addEventListener('change', () => {
+            const file = fileInput.files[0];
+            fileName.textContent = file ? `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB` : 'PDF, DOCX, PNG, or JPG · up to 10 MB';
+        });
+        ['dragenter', 'dragover'].forEach(type => fileDrop.addEventListener(type, event => {
+            event.preventDefault();
+            fileDrop.classList.add('is-dragging');
+        }));
+        ['dragleave', 'drop'].forEach(type => fileDrop.addEventListener(type, event => {
+            event.preventDefault();
+            fileDrop.classList.remove('is-dragging');
+        }));
+        fileDrop.addEventListener('drop', event => {
+            const [file] = event.dataTransfer.files;
+            if (!file) return;
             const transfer = new DataTransfer();
             transfer.items.add(file);
             fileInput.files = transfer.files;
             fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (!form.reportValidity()) return;
+            const file = fileInput.files[0];
+            const allowedExtension = /\.(pdf|docx|png|jpe?g)$/i.test(file?.name || '');
+            if (!file || file.size < 1 || file.size > 10 * 1024 * 1024 || !allowedExtension) {
+                message.textContent = 'Choose a PDF, DOCX, PNG, or JPG file between 1 byte and 10 MB.';
+                message.className = 'proposal-upload-message is-error';
+                message.hidden = false;
+                return;
+            }
+            const payload = new FormData();
+            const documentType = slot.key === 'signed_moa_mou'
+                ? form.elements.agreementType.value
+                : slot.type;
+            const isSigned = slot.signed ? form.elements.isSigned.checked : false;
+            payload.set('payload', JSON.stringify({
+                documentType,
+                isSigned,
+                description: form.elements.description.value.trim()
+            }));
+            payload.set('file', file);
+            submit.disabled = true;
+            submit.textContent = 'Uploading…';
+            message.hidden = true;
+            try {
+                const result = await request(`/proposals/${proposalId}/documents`, { method: 'POST', body: payload });
+                if (Number(result.proposalId) !== proposalId) {
+                    throw new Error('The document upload was associated with an unexpected proposal.');
+                }
+                updateProposalAttachmentCount(proposalId, result.attachmentCount);
+                documentState = {
+                    documents: [{
+                        id: Number(result.id),
+                        document_type: documentType,
+                        original_name: file.name,
+                        is_signed: isSigned
+                    }, ...documentState.documents],
+                    readiness: result.readiness
+                };
+                const replacement = renderSlot(slot, documentState);
+                card.replaceWith(replacement);
+                if (row) row.dataset.documentReadiness = JSON.stringify(documentState.readiness);
+                message.textContent = `${slot.title} uploaded successfully.`;
+                message.className = 'proposal-upload-message is-success';
+                message.hidden = false;
+                showMessage(pageMessage, 'Proposal document uploaded.');
+            } catch (error) {
+                message.textContent = error.message;
+                message.className = 'proposal-upload-message is-error';
+                message.hidden = false;
+            } finally {
+                submit.disabled = false;
+                submit.textContent = existing ? 'Replace file' : 'Upload file';
+            }
+        });
+        card.append(form);
+        return card;
+    };
+
+    proposalDocumentSlots().forEach(slot => {
+        const card = renderSlot(slot, documentState);
+        if (focusSlot === slot.key) card.classList.add('is-focus-target');
+        slots.append(card);
+    });
+    const footer = node('footer', undefined, 'proposal-upload-actions');
+    footer.append(button('Close', 'close-document-upload', 'button button-quiet'));
+    content.append(header, message, slots, footer);
+    dialog.append(content);
+    document.body.append(dialog);
+    dialog.showModal();
+    if (focusSlot) {
+        requestAnimationFrame(() => dialog.querySelector(`[data-document-slot="${CSS.escape(focusSlot)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    }
+}
+
+async function openSubmitConfirmation(proposalId) {
+    document.querySelector('#proposal-submit-modal')?.remove();
+    let documentState;
+    try {
+        documentState = await loadProposalDocuments(proposalId);
+    } catch (error) {
+        showMessage(pageMessage, error.message, 'error');
+        return;
+    }
+    const proposalRow = pageContent.querySelector(`tr [data-action="submit-${proposalId}"]`)?.closest('tr');
+    const proposalTitle = proposalRow?.querySelector('.proposal-title-cell strong')?.textContent || 'this proposal';
+    const slots = proposalDocumentSlots().filter(slot => slot.required);
+    const missing = slots.filter(slot => !documentState.readiness[slot.key]);
+    const dialog = node('dialog', undefined, 'proposal-submit-modal');
+    dialog.id = 'proposal-submit-modal';
+    dialog.setAttribute('aria-labelledby', 'proposal-submit-title');
+    const content = node('div', undefined, 'proposal-submit-content');
+    const header = node('header', undefined, 'proposal-submit-header');
+    const heading = node('div');
+    heading.append(node('p', 'SUBMISSION REVIEW', 'eyebrow'));
+    const title = node('h2', 'Submit proposal');
+    title.id = 'proposal-submit-title';
+    heading.append(title);
+    const close = button('×', 'close-proposal-submit', 'button button-quiet proposal-submit-close');
+    close.setAttribute('aria-label', 'Close submission dialog');
+    header.append(heading, close);
+
+    const body = node('div', undefined, 'proposal-submit-body');
+    const summary = node('p', undefined, 'proposal-submit-summary');
+    summary.textContent = missing.length
+        ? `Complete the required documents for “${proposalTitle}” before submitting.`
+        : `Are you sure you want to submit “${proposalTitle}” for CES Admin review? Once submitted, editing will be restricted.`;
+    body.append(summary);
+    const checklist = node('ul', undefined, 'proposal-submit-checklist');
+    slots.forEach(slot => {
+        const ready = Boolean(documentState.readiness[slot.key]);
+        const item = node('li', undefined, ready ? 'is-complete' : 'is-missing');
+        item.append(
+            node('span', ready ? '✓' : '!', 'proposal-checklist-mark'),
+            node('span', `${slot.title}${ready ? ' attached' : ' missing'}`)
+        );
+        if (!ready) {
+            const attach = button('Attach', `attach-required-document-${proposalId}-${slot.key}`, 'button button-quiet button-small');
+            attach.addEventListener('click', () => {
+                dialog.close();
+                dialog.remove();
+                openDocumentForm(proposalId, { focusSlot: slot.key });
+            });
+            item.append(attach);
+        }
+        checklist.append(item);
+    });
+    body.append(checklist);
+    const message = node('p', '', 'proposal-submit-message');
+    message.hidden = true;
+    const footer = node('footer', undefined, 'proposal-submit-actions');
+    const cancel = button('Cancel', 'close-proposal-submit', 'button button-quiet');
+    const confirm = button('Confirm Submission', `confirm-proposal-submit-${proposalId}`, 'button button-primary');
+    confirm.disabled = missing.length > 0;
+    if (missing.length) confirm.textContent = 'Complete required documents';
+    footer.append(cancel, confirm);
+    content.append(header, body, message, footer);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="close-proposal-submit"]')) dialog.close();
+        if (event.target.closest(`[data-action^="confirm-proposal-submit-${proposalId}"]`)) {
+            event.preventDefault();
         }
     });
-    form.addEventListener('submit', async event => {
-        event.preventDefault();
-        if (!form.reportValidity()) return;
-        const file = fileInput.files[0];
-        if (!file || file.size < 1 || file.size > 10 * 1024 * 1024) {
-            modalMessage.textContent = 'Choose a file between 1 byte and 10 MB.';
-            modalMessage.className = 'proposal-upload-message is-error';
-            modalMessage.hidden = false;
-            return;
-        }
-        const payload = new FormData();
-        payload.set('payload', JSON.stringify({
-            documentType: form.elements.documentType.value,
-            isSigned: form.elements.isSigned.checked,
-            description: form.elements.description.value.trim()
-        }));
-        payload.set('file', file);
-        const submit = form.querySelector('[type="submit"]');
-        submit.disabled = true;
-        submit.textContent = 'Uploading…';
+    confirm.addEventListener('click', async () => {
+        if (missing.length) return;
+        confirm.disabled = true;
+        confirm.textContent = 'Submitting…';
         try {
-            const result = await request(`/proposals/${proposalId}/documents`, { method: 'POST', body: payload });
-            if (Number(result.proposalId) !== proposalId) {
-                throw new Error('The document upload was associated with an unexpected proposal.');
-            }
-            if (row) {
-                const count = row.querySelector('[data-attachment-count]');
-                if (count) count.textContent = `${Number(result.attachmentCount)} document(s) attached`;
-            }
-            modalMessage.textContent = 'Document uploaded successfully.';
-            modalMessage.className = 'proposal-upload-message is-success';
-            modalMessage.hidden = false;
-            form.reset();
-            fileName.textContent = 'PDF, DOCX, PNG, or JPG · up to 10 MB';
-            submit.textContent = 'Done';
-            submit.disabled = false;
-            submit.type = 'button';
-            submit.addEventListener('click', closeDialog, { once: true });
-            showMessage(pageMessage, 'Proposal document uploaded.');
+            await request(`/proposals/${proposalId}/submit`, { method: 'POST', body: '{}' });
+            dialog.close();
+            await renderPage('proposals');
+            showMessage(pageMessage, 'Proposal submitted for CES Admin review.');
         } catch (error) {
-            modalMessage.textContent = error.message;
-            modalMessage.className = 'proposal-upload-message is-error';
-            modalMessage.hidden = false;
-            submit.disabled = false;
-            submit.textContent = 'Upload File';
+            message.textContent = error.message;
+            message.className = 'proposal-submit-message is-error';
+            message.hidden = false;
+            confirm.disabled = false;
+            confirm.textContent = 'Confirm Submission';
         }
     });
-    pageContent.append(dialog);
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.append(dialog);
     dialog.showModal();
 }
 
@@ -2542,7 +3258,10 @@ async function showDateAttendance(eventDateId) {
     attendance.forEach(item => {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
-        info.append(node('strong', `${item.first_name} ${item.last_name}`), node('small', item.email));
+        info.append(
+            node('strong', `${item.first_name} ${item.last_name}`),
+            node('small', `${item.email} · ${item.affiliation || 'Volunteer'} · ${item.attendance_status || 'Not recorded'}${item.scanned_at ? ` · ${dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}`)
+        );
         const controls = node('div', undefined, 'attendance-edit-controls');
         const status = node('select');
         status.setAttribute('aria-label', `Attendance status for ${item.first_name} ${item.last_name}`);
@@ -2587,6 +3306,7 @@ async function showParticipantCounts(eventDateId) {
                 body: JSON.stringify({ group: values.group, count: Number(values.count) })
             });
             await showParticipantCounts(eventDateId);
+            await refreshAdminEventSummary();
         } catch (error) {
             showMessage(pageMessage, error.message, 'error');
         }
@@ -2649,10 +3369,16 @@ async function showCertificates(eventId) {
 async function showApplications(eventId) {
     const { applications } = await request(`/events/${eventId}/applications`);
     const section = panel('Volunteer applications');
+    section.classList.add('applications-panel');
     if (!applications.length) section.append(node('div', 'No applications have been submitted.', 'empty'));
     applications.forEach(application => {
         const row = node('div', undefined, 'record');
-        row.append(node('div', `${application.first_name} ${application.last_name} · ${application.email}`, 'record-main'));
+        const info = node('div', undefined, 'record-main');
+        info.append(
+            node('strong', `${application.first_name} ${application.last_name}`),
+            node('small', `${application.email} · ${application.affiliation || 'Volunteer'} · Applied ${dashboardDate(application.applied_at, { month: 'short', day: 'numeric', year: 'numeric' })} · ${Number(application.attendance_count || 0)} date(s) attended`)
+        );
+        row.append(info);
         row.append(node('span', application.status, `badge status-badge status-${application.status}`));
         if (application.status === 'pending') {
             const actions = node('div', undefined, 'record-actions');
@@ -2727,32 +3453,56 @@ async function exportReport(format) {
 
 async function showProjectDossier(projectId) {
     const data = await request(`/reports/projects/${projectId}`);
-    const section = panel(data.project.title, `${data.project.status.replaceAll('_', ' ')} · ${data.project.periodStart || 'Unscheduled'} to ${data.project.periodEnd || 'Unscheduled'}`);
-    section.append(node('p', data.project.summary));
-    const brief = node('section', undefined, 'dossier-section project-brief-details');
-    const briefHeading = node('div', undefined, 'project-brief-heading');
-    briefHeading.append(node('h3', 'Project Brief'));
-    const briefDownload = node('a', 'Download / Print PDF', 'button button-quiet button-small');
-    briefDownload.href = `${API}/proposals/${projectId}/brief.pdf`;
-    briefHeading.append(briefDownload);
-    brief.append(briefHeading);
+    document.querySelector('#project-dossier-modal')?.remove();
+    const project = data.project;
+    const dateRange = project.periodStart
+        ? `${project.periodStart}${project.periodEnd ? ` to ${project.periodEnd}` : ''}`
+        : 'Unscheduled';
+    const dialog = node('dialog', undefined, 'project-dossier-modal');
+    dialog.id = 'project-dossier-modal';
+    dialog.setAttribute('aria-labelledby', 'project-dossier-title');
+    const content = node('div', undefined, 'project-dossier-content');
+    const header = node('header', undefined, 'project-dossier-header');
+    const heading = node('div', undefined, 'project-dossier-heading');
+    const eyebrow = node('p', 'PROJECT PROPOSAL', 'eyebrow');
+    const title = node('h2', project.title);
+    title.id = 'project-dossier-title';
+    const status = node('span', project.status.replaceAll('_', ' '), `badge proposal-status status-${project.status}`);
+    const headingMeta = node('div', undefined, 'project-dossier-meta');
+    headingMeta.append(status, node('span', dateRange));
+    heading.append(eyebrow, title, headingMeta);
+    const closeButton = button('×', 'close-project-dossier', 'button button-quiet project-dossier-close');
+    closeButton.type = 'button';
+    closeButton.setAttribute('aria-label', 'Close proposal details');
+    header.append(heading, closeButton);
+
+    const body = node('div', undefined, 'project-dossier-body');
+    const summary = node('section', undefined, 'project-dossier-section project-dossier-summary');
+    summary.append(node('h3', 'Project Overview'), node('p', project.summary || 'No brief description provided.'));
+    body.append(summary);
+
+    const brief = node('section', undefined, 'project-dossier-section');
+    brief.append(node('h3', 'Project Brief'));
     const briefGroups = [
-        ['Co-Proponents / Partner Entities', (data.project.proponents || []).join(', ') || 'No co-proponents provided.'],
-        ['Program Duration', data.project.duration || 'Not provided'],
-        ['Activity Components', (data.project.activityComponents || []).join('\n') || 'No activity components provided.'],
-        ['Justification / Objectives', data.project.justification || 'Not provided'],
-        ['Target Beneficiaries & Headcount', data.project.targetBeneficiaries || 'Not provided'],
-        ['Target Outputs / Success Indicators', data.project.targetOutputs || 'Not provided'],
-        ['Possible Risks & Mitigation Plan', data.project.possibleRisks || 'Not provided'],
-        ['Expected Private / External Partnerships', data.project.expectedPrivatePartnerships || 'Not provided']
+        ['Co-Proponents / Partner Entities', (project.proponents || []).join(', ') || 'No co-proponents provided.'],
+        ['Program Duration', project.duration || dateRange],
+        ['Activity Components', (project.activityComponents || []).join('\n') || 'No activity components provided.'],
+        ['Justification / Objectives', project.justification || 'Not provided'],
+        ['Target Beneficiaries & Headcount', project.targetBeneficiaries || 'Not provided'],
+        ['Target Outputs / Success Indicators', project.targetOutputs || 'Not provided'],
+        ['Possible Risks & Mitigation Plan', project.possibleRisks || 'Not provided'],
+        ['Expected Private / External Partnerships', project.expectedPrivatePartnerships || 'Not provided']
     ];
+    const fields = node('div', undefined, 'project-dossier-fields');
     briefGroups.forEach(([label, value]) => {
         const detail = node('div', undefined, 'project-brief-field');
         detail.append(node('strong', label), node('p', value));
-        brief.append(detail);
+        fields.append(detail);
     });
-    const budget = node('div', undefined, 'project-brief-budget');
-    budget.append(node('strong', 'Estimated Cost Breakdown'));
+    brief.append(fields);
+
+    const budget = node('section', undefined, 'project-dossier-section project-dossier-budget');
+    budget.append(node('h3', 'Estimated Cost Breakdown'));
     const budgetItems = data.project.estimatedCostItems || [];
     if (!budgetItems.length) {
         budget.append(node('p', 'No budget items provided.'));
@@ -2772,11 +3522,14 @@ async function showProjectDossier(projectId) {
             tbody.append(row);
         });
         table.append(tbody);
-        budget.append(table);
+        const tableWrap = node('div', undefined, 'proposal-table-wrap');
+        tableWrap.append(table);
+        budget.append(tableWrap);
     }
-    budget.append(node('p', `Total Estimated Cost: ₱${Number(data.project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
+    budget.append(node('p', `Total Estimated Cost: ₱${Number(project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
     brief.append(budget);
-    section.append(brief);
+    body.append(brief);
+
     const groups = [
         ['Partners', data.partners.map(item => `${item.organization_name} (${item.relationship})`)],
         ['Schedule', data.schedules.map(item => `${item.event_date} · ${item.event_title} / ${item.activity_title} · ${item.start_time}–${item.end_time} · ${item.venue}`)],
@@ -2784,14 +3537,19 @@ async function showProjectDossier(projectId) {
         ['Volunteers', data.volunteers.map(item => `${item.first_name} ${item.last_name} · ${item.volunteer_type} · ${item.event_title} · ${item.application_status}`)],
         ['Participants', data.participants.map(item => `${item.event_date} · ${item.event_title} · ${item.participant_group}: ${item.participant_count}`)]
     ];
+    const related = node('section', undefined, 'project-dossier-section project-dossier-related');
+    related.append(node('h3', 'Related Activity'));
+    const relatedGrid = node('div', undefined, 'project-dossier-related-grid');
     for (const [title, rows] of groups) {
-        const subsection = node('section', undefined, 'dossier-section');
-        subsection.append(node('h3', title));
+        const subsection = node('div', undefined, 'project-dossier-related-card');
+        subsection.append(node('h4', title));
         if (!rows.length) subsection.append(node('p', 'No records yet.'));
         rows.forEach(text => subsection.append(node('p', text)));
-        section.append(subsection);
+        relatedGrid.append(subsection);
     }
-    const documents = node('section', undefined, 'dossier-section');
+    related.append(relatedGrid);
+
+    const documents = node('section', undefined, 'project-dossier-section project-dossier-documents');
     documents.append(node('h3', 'Documentation'));
     if (!data.documents.length) documents.append(node('p', 'No documents attached.'));
     data.documents.forEach(item => {
@@ -2802,16 +3560,31 @@ async function showProjectDossier(projectId) {
         link.rel = 'noopener';
         documents.append(link);
     });
-    section.append(documents);
     const evaluation = data.evaluation;
-    const evaluationSection = node('section', undefined, 'dossier-section');
+    const evaluationSection = node('section', undefined, 'project-dossier-section project-dossier-evaluation');
     evaluationSection.append(node('h3', 'Evaluation'), node('p', `${evaluation.evaluation_count} response(s) · average rating ${evaluation.average_rating ? Number(evaluation.average_rating).toFixed(1) : 'not rated'}/5`));
-    section.append(evaluationSection);
-    const existing = pageContent.querySelector('.project-dossier');
-    existing?.remove();
-    section.classList.add('project-dossier');
-    pageContent.prepend(section);
-    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    body.append(related, documents, evaluationSection);
+
+    const footer = node('footer', undefined, 'project-dossier-footer');
+    const download = node('a', 'Download / Print PDF', 'button button-primary');
+    download.href = `${API}/proposals/${projectId}/brief.pdf`;
+    download.target = '_blank';
+    download.rel = 'noopener';
+    const footerClose = button('Close', 'close-project-dossier', 'button button-quiet');
+    footerClose.type = 'button';
+    footer.append(download, footerClose);
+
+    content.append(header, body, footer);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog) dialog.close();
+    });
+    dialog.addEventListener('click', event => {
+        if (event.target.closest('[data-action="close-project-dossier"]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
 }
 
 async function startQrCamera(trigger) {
