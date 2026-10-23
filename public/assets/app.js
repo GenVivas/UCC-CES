@@ -1,4 +1,3 @@
-const API = 'api';
 const authView = document.querySelector('#auth-view');
 const appView = document.querySelector('#app-view');
 const authMessage = document.querySelector('#auth-message');
@@ -9,7 +8,6 @@ const topActions = document.querySelector('#top-actions');
 const pageRoutes = {
     overview: '',
     proposals: 'proposals',
-    directory: 'directory',
     events: 'events',
     applications: 'applications',
     'joined-events': 'joined-events',
@@ -25,6 +23,7 @@ const scriptBasePath = routeScript
     ? new URL(routeScript.src, window.location.href).pathname.replace(/\/assets\/app\.js$/, '').replace(/\/public$/, '')
     : '';
 const appBasePath = scriptBasePath.replace(/\/$/, '');
+const API = `${appBasePath}/api`;
 let csrfToken = '';
 let currentUser = null;
 let currentPage = 'overview';
@@ -91,6 +90,12 @@ function navigateToEvent(eventId) {
     currentEventId = id;
     syncNavigation('events');
     return renderPage('events');
+}
+
+function navigateToEventPage(eventId) {
+    const id = Number(eventId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('A valid event is required.');
+    window.location.assign(`${pageUrl('events')}/${id}`);
 }
 
 async function request(path, options = {}) {
@@ -527,7 +532,6 @@ async function renderPage(page) {
     }
     const pageRoles = {
         proposals: ['admin', 'partner'],
-        directory: ['admin', 'partner'],
         accounts: ['admin'],
         reports: ['admin', 'partner'],
         notifications: ['admin', 'partner'],
@@ -555,7 +559,6 @@ async function renderPage(page) {
     const pages = {
         overview: ['Overview', 'A quick view of your UCC-CES workspace.'],
         proposals: ['Proposals', 'Build, submit, and track community project proposals.'],
-        directory: ['Partner directory', 'Find approved organizations across the community network.'],
         events: ['Events', 'Browse the event calendar and register for active community programs.'],
         applications: ['My Applications', 'Track pending, approved, and declined event applications.'],
         'joined-events': ['Joined Events', 'Review approved registrations and check in using event QR codes.'],
@@ -571,7 +574,6 @@ async function renderPage(page) {
     try {
         if (page === 'overview') await renderOverview();
         if (page === 'proposals') await renderProposals();
-        if (page === 'directory') await renderDirectory();
         if (page === 'events') await renderEvents();
         if (page === 'applications') await renderVolunteerApplications();
         if (page === 'joined-events') await renderVolunteerJoinedEvents();
@@ -1143,7 +1145,10 @@ async function renderProposals() {
                 button('Decline', `collaborate-${proposal.id}-declined`, 'button button-danger button-small')
             );
         }
-        if (currentUser.role === 'admin' && ['submitted', 'under_review', 'revision', 'approved', 'active'].includes(proposal.status)) {
+        const canInviteCollaborator = ['submitted', 'under_review', 'revision', 'approved', 'active'].includes(proposal.status) &&
+            (currentUser.role === 'admin' ||
+                (currentUser.role === 'partner' && Number(proposal.owner_user_id) === currentUser.id));
+        if (canInviteCollaborator) {
             actions.append(button('Invite partner', `invitepartner-${proposal.id}`, 'button button-quiet button-small'));
         }
         if (currentUser.role === 'admin' && ['submitted', 'under_review'].includes(proposal.status)) {
@@ -1191,6 +1196,13 @@ function createProposalWizard(categories, proposal = null) {
             <label>Program Start Date<input name="periodStart" type="date" required></label>
             <label>Program End Date<input name="periodEnd" type="date" required></label>
             <label class="wide">Program Duration / Term<input name="duration" maxlength="100" placeholder="Optional, e.g. 2-day program or 3 months"></label>
+            <label class="wide proposal-volunteer-toggle"><input name="acceptsVolunteers" type="checkbox" value="1" data-accepts-volunteers> Will this project engage volunteers?</label>
+            <label class="wide proposal-volunteer-mode" data-volunteer-mode-wrap hidden>Volunteer Approval Type
+                <select name="volunteerApprovalMode" data-volunteer-approval-mode>
+                    <option value="manual">Manual Review — applications require approval</option>
+                    <option value="auto">Auto Accept — registrations are approved immediately</option>
+                </select>
+            </label>
         </section>
         <section class="proposal-wizard-step" data-wizard-step="1" hidden>
             <h3>2. Activity Components &amp; Justification</h3>
@@ -1242,6 +1254,13 @@ function createProposalWizard(categories, proposal = null) {
 
     form.elements.title.value = proposal?.title || '';
     form.elements.summary.value = proposal?.summary || '';
+    form.elements.acceptsVolunteers.checked = proposal?.acceptsVolunteers ?? true;
+    form.elements.volunteerApprovalMode.value = proposal?.volunteerApprovalMode || 'manual';
+    const volunteerModeWrap = form.querySelector('[data-volunteer-mode-wrap]');
+    volunteerModeWrap.hidden = !form.elements.acceptsVolunteers.checked;
+    form.elements.acceptsVolunteers.addEventListener('change', () => {
+        volunteerModeWrap.hidden = !form.elements.acceptsVolunteers.checked;
+    });
     form.elements.periodStart.value = proposal?.periodStart || '';
     form.elements.periodEnd.value = proposal?.periodEnd || '';
     form.elements.duration.value = proposal?.duration || '';
@@ -1431,6 +1450,8 @@ function updateProposalBudgetTotal(form) {
 function serializeProposalWizard(form) {
     const formData = new FormData(form);
     const data = Object.fromEntries(formData);
+    data.acceptsVolunteers = form.elements.acceptsVolunteers.checked;
+    data.volunteerApprovalMode = form.elements.volunteerApprovalMode.value;
     data.proponents = Array.from(form.querySelectorAll('[data-proponents-list] input')).map(input => input.value.trim()).filter(Boolean);
     data.activityComponents = Array.from(form.querySelectorAll('[data-activities-list] textarea')).map(input => input.value.trim()).filter(Boolean);
     data.estimatedCostItems = Array.from(form.querySelectorAll('[data-budget-list] [data-editor-row]')).map(row => ({
@@ -1556,370 +1577,6 @@ async function createProposal(event) {
         showMessage(pageMessage, error.message, 'error');
     } finally {
         setBusy(form, false);
-    }
-}
-
-async function renderDirectory() {
-    const { partners, sectors = [] } = await request('/directory');
-    const section = panel('Partner catalog', 'Explore approved organizations, connect with potential co-proponents, and view their CES collaboration history.');
-    section.classList.add('partner-catalog');
-    const toolbar = node('div', undefined, 'partner-catalog-toolbar');
-    const intro = node('div', undefined, 'partner-catalog-intro');
-    intro.append(node('span', `${partners.length} approved organizations`, 'partner-catalog-count'));
-    const toolbarActions = node('div', undefined, 'partner-catalog-actions');
-    if (currentUser.role === 'admin') {
-        const manage = button('Manage sectors', 'manage-sectors', 'button button-quiet');
-        manage.addEventListener('click', () => openSectorManager(sectors));
-        toolbarActions.append(manage);
-    }
-    toolbar.append(intro, toolbarActions);
-
-    const filters = node('div', undefined, 'directory-toolbar');
-    const categories = [
-        ['UCC Academic Units', 'UCC Department / Academic Unit'],
-        ['Local Government Units (LGU / Barangay)', 'Local Government Unit (LGU / Barangay)'],
-        ['Government Agencies (e.g., MMDA, DSWD)', 'Government Agency (e.g., MMDA, DSWD)'],
-        ['NGOs / Non-Profits', 'NGO / Non-Profit Organization'],
-        ['Private Sector / Corporate Partners', 'Private Sector / Corporate Partner']
-    ];
-    const searchLabel = node('label', 'Search partners');
-    const search = node('input');
-    search.type = 'search';
-    search.name = 'search';
-    search.placeholder = 'Partner, representative, email, phone, or location';
-    searchLabel.append(search);
-    const categoryLabel = node('label', 'Organization category');
-    const categoryFilter = node('select');
-    categoryFilter.name = 'category';
-    categoryFilter.add(new Option('All Partners', ''));
-    categories.forEach(([label, value]) => categoryFilter.add(new Option(label, value)));
-    categoryLabel.append(categoryFilter);
-    const statusLabel = node('label', 'Partnership activity');
-    const statusFilter = node('select');
-    statusFilter.name = 'status';
-    statusFilter.add(new Option('All activity', ''));
-    statusFilter.add(new Option('Active Partner', 'active'));
-    statusFilter.add(new Option('Inactive / Past Partner', 'inactive'));
-    statusLabel.append(statusFilter);
-    filters.append(searchLabel, categoryLabel, statusLabel);
-
-    const list = node('div', undefined, 'partner-catalog-grid');
-    partners.forEach(partner => {
-        const category = partner.organization_category || partner.organization_type || 'Other';
-        const active = Number(partner.active_project_count || 0) > 0 || Number(partner.upcoming_event_count || 0) > 0;
-        const searchable = [
-            partner.organization_name, partner.first_name, partner.last_name, partner.official_designation,
-            partner.email, partner.contact_number,
-            partner.address, category, partner.sectors, partner.subcategories
-        ].filter(Boolean).join(' ').toLocaleLowerCase();
-        const card = node('article', undefined, 'partner-catalog-card');
-        card.dataset.search = searchable;
-        card.dataset.category = category;
-        card.dataset.status = active ? 'active' : 'inactive';
-        const cardHeader = node('div', undefined, 'partner-card-header');
-        const initials = partner.organization_name.trim().split(/\s+/).slice(0, 2).map(part => part[0] || '').join('').toLocaleUpperCase();
-        cardHeader.append(node('span', initials || 'P', 'partner-logo-placeholder'));
-        const badges = node('div', undefined, 'partner-card-badges');
-        badges.append(
-            node('span', category.replace(/\s*\(e\.g\.,[^)]*\)/i, ''), 'badge partner-category-badge'),
-            node('span', active ? 'Active partner' : 'Past partner', `badge partner-activity-badge ${active ? 'is-active' : 'is-inactive'}`)
-        );
-        cardHeader.append(badges);
-        const cardInfo = node('div', undefined, 'partner-card-info');
-        cardInfo.append(node('h3', partner.organization_name));
-        const representative = [partner.first_name, partner.last_name].filter(Boolean).join(' ');
-        cardInfo.append(node('p', [representative, partner.official_designation].filter(Boolean).join(' · ') || 'Representative not listed'));
-        const contact = node('div', undefined, 'partner-card-contact');
-        contact.append(
-            node('span', partner.email || 'Email not listed'),
-            node('span', partner.contact_number || 'Phone not listed'),
-            node('span', partner.address || 'Location not listed')
-        );
-        const stats = node('div', undefined, 'partner-card-stats');
-        stats.append(
-            node('div', `${Number(partner.active_project_count || 0)} active · ${Number(partner.completed_project_count || 0)} completed CES projects`, 'partner-card-stat'),
-            node('div', `${Number(partner.upcoming_event_count || 0)} upcoming · ${Number(partner.past_event_count || 0)} past events`, 'partner-card-stat')
-        );
-        const actions = node('div', undefined, 'partner-card-actions');
-        const view = button('View Organization Profile', `viewpartner-${partner.id}`, 'button button-primary button-small');
-        view.addEventListener('click', () => showPartnerProfile(Number(partner.id), sectors));
-        actions.append(view);
-        card.append(cardHeader, cardInfo, contact, stats, actions);
-        list.append(card);
-    });
-
-    const empty = node('div', partners.length ? 'No partners match the selected filters.' : 'No approved partners are listed yet.', 'empty partner-catalog-empty');
-    empty.hidden = partners.length > 0;
-    const applyFilters = () => {
-        const query = search.value.trim().toLocaleLowerCase();
-        let visibleCount = 0;
-        list.querySelectorAll('.partner-catalog-card').forEach(card => {
-            const matches = (!query || card.dataset.search.includes(query))
-                && (!categoryFilter.value || card.dataset.category === categoryFilter.value)
-                && (!statusFilter.value || card.dataset.status === statusFilter.value);
-            card.hidden = !matches;
-            if (matches) visibleCount++;
-        });
-        empty.hidden = visibleCount > 0;
-    };
-    filters.addEventListener('input', applyFilters);
-    filters.addEventListener('change', applyFilters);
-    section.append(toolbar, filters, list, empty);
-    pageContent.append(section);
-}
-
-function openSectorManager(sectors) {
-    document.querySelector('#sector-manager-modal')?.remove();
-    const dialog = node('dialog', undefined, 'sector-manager-modal');
-    dialog.id = 'sector-manager-modal';
-    dialog.setAttribute('aria-labelledby', 'sector-manager-title');
-    const content = node('div', undefined, 'sector-manager-content');
-    const header = node('header', undefined, 'sector-manager-header');
-    const heading = node('div');
-    heading.append(node('p', 'DIRECTORY SETTINGS', 'eyebrow'));
-    const title = node('h2', 'Manage sectors');
-    title.id = 'sector-manager-title';
-    heading.append(title);
-    const close = button('×', 'close-sector-manager', 'button button-quiet sector-manager-close');
-    close.setAttribute('aria-label', 'Close sector manager');
-    header.append(heading, close);
-
-    const forms = node('div', undefined, 'sector-manager-forms');
-    const sectorForm = node('form', undefined, 'sector-manager-form');
-    sectorForm.innerHTML = '<label>New sector<input name="name" maxlength="120" placeholder="e.g., Education and Skills" required></label><button class="button button-primary" type="submit">Add sector</button>';
-    const subcategoryForm = node('form', undefined, 'sector-manager-form');
-    subcategoryForm.innerHTML = '<label>Parent sector<select name="sectorId" required></select></label><label>New subcategory<input name="name" maxlength="120" placeholder="e.g., Digital literacy" required></label><button class="button button-primary" type="submit">Add subcategory</button>';
-    const sectorOptions = new Map();
-    sectors.forEach(item => sectorOptions.set(String(item.sector_id), item.sector_name));
-    Array.from(sectorOptions.entries()).sort((a, b) => a[1].localeCompare(b[1])).forEach(([id, name]) => {
-        subcategoryForm.elements.sectorId.add(new Option(name, id));
-    });
-    const message = node('p', '', 'sector-manager-message');
-    message.hidden = true;
-    const onSubmit = (form, payload, successMessage) => {
-        form.addEventListener('submit', async event => {
-            event.preventDefault();
-            const submitButton = form.querySelector('button[type="submit"]');
-            submitButton.disabled = true;
-            try {
-                await request('/directory', { method: 'POST', body: JSON.stringify(payload(form)) });
-                dialog.close();
-                await renderPage('directory');
-                showMessage(pageMessage, successMessage);
-            } catch (error) {
-                message.textContent = error.message;
-                message.className = 'sector-manager-message is-error';
-                message.hidden = false;
-            } finally {
-                submitButton.disabled = false;
-            }
-        });
-    };
-    onSubmit(sectorForm, form => ({ type: 'sector', name: form.elements.name.value }), 'Sector added.');
-    onSubmit(subcategoryForm, form => ({
-        type: 'subcategory',
-        sectorId: form.elements.sectorId.value,
-        name: form.elements.name.value
-    }), 'Subcategory added.');
-    forms.append(sectorForm, subcategoryForm);
-
-    const list = node('section', undefined, 'sector-manager-list');
-    list.append(node('h3', 'Current sectors and subcategories'));
-    const grouped = new Map();
-    sectors.forEach(item => {
-        const key = String(item.sector_id);
-        if (!grouped.has(key)) grouped.set(key, { name: item.sector_name, subcategories: [] });
-        if (item.subcategory_name) grouped.get(key).subcategories.push(item.subcategory_name);
-    });
-    if (!grouped.size) {
-        list.append(node('p', 'No sectors have been created yet.'));
-    } else {
-        grouped.forEach(group => {
-            const row = node('div', undefined, 'sector-manager-row');
-            row.append(node('strong', group.name), node('span', group.subcategories.join(' · ') || 'No subcategories'));
-            list.append(row);
-        });
-    }
-    const footer = node('footer', undefined, 'sector-manager-footer');
-    const done = button('Done', 'close-sector-manager', 'button button-quiet');
-    footer.append(done);
-    content.append(header, message, forms, list, footer);
-    dialog.append(content);
-    dialog.addEventListener('click', event => {
-        if (event.target === dialog || event.target.closest('[data-action="close-sector-manager"]')) dialog.close();
-    });
-    dialog.addEventListener('close', () => dialog.remove(), { once: true });
-    document.body.append(dialog);
-    dialog.showModal();
-}
-
-async function showPartnerProfile(partnerId, sectors) {
-    try {
-        const { partner, projects } = await request(`/directory/${partnerId}`);
-        document.querySelector('#partner-profile-modal')?.remove();
-        const dialog = node('dialog', undefined, 'partner-profile-modal');
-        dialog.id = 'partner-profile-modal';
-        dialog.setAttribute('aria-labelledby', 'partner-profile-title');
-        const content = node('div', undefined, 'partner-profile-content');
-        const header = node('header', undefined, 'partner-profile-header');
-        const heading = node('div', undefined, 'partner-profile-heading');
-        const eyebrow = node('p', 'PARTNER ORGANIZATION', 'eyebrow');
-        const title = node('h2', partner.organization_name);
-        title.id = 'partner-profile-title';
-        const meta = node('div', undefined, 'partner-profile-meta');
-        meta.append(
-            node('span', partner.organization_category || partner.organization_type, 'badge partner-category-badge'),
-            node('span', partner.sectors || 'Unclassified')
-        );
-        heading.append(eyebrow, title, meta);
-        const close = button('×', 'close-partner-profile', 'button button-quiet partner-profile-close');
-        close.setAttribute('aria-label', 'Close organization profile');
-        header.append(heading, close);
-
-        const body = node('div', undefined, 'partner-profile-body');
-        const details = node('section', undefined, 'partner-profile-section');
-        details.append(node('h3', 'Organization details'));
-        const detailGrid = node('dl', undefined, 'partner-profile-detail-grid');
-        [
-            ['Category', partner.organization_category || partner.organization_type || 'Not listed'],
-            ['Sector tags', partner.subcategories || partner.sectors || 'Not classified'],
-            ['Representative', [partner.first_name, partner.last_name].filter(Boolean).join(' ') || 'Not listed'],
-            ['Designation', partner.official_designation || 'Not listed'],
-            ['Email', partner.email || 'Not listed'],
-            ['Phone', partner.contact_number || 'Not listed'],
-            ['Location', partner.address || 'Not listed'],
-            ['Account status', partner.account_status || 'approved']
-        ].forEach(([label, value]) => {
-            detailGrid.append(node('dt', label), node('dd', value));
-        });
-        details.append(detailGrid);
-
-        const verification = node('section', undefined, 'partner-profile-section');
-        verification.append(node('h3', 'Verification & agreements'));
-        const signedMoa = projects.reduce((sum, project) => sum + Number(project.signed_moa_count || 0), 0);
-        const signedMou = projects.reduce((sum, project) => sum + Number(project.signed_mou_count || 0), 0);
-        verification.append(
-            node('p', partner.verification_available ? 'Organization verification document is on file.' : 'No organization verification document is on file.'),
-            node('p', `${signedMoa} signed MOA · ${signedMou} signed MOU across approved collaborations.`)
-        );
-        if (currentUser.role === 'admin' && partner.verification_available) {
-            const proof = node('a', 'View verification document', 'button button-quiet button-small');
-            proof.href = `api/accounts/${partner.id}/proof`;
-            proof.target = '_blank';
-            proof.rel = 'noopener';
-            verification.append(proof);
-        }
-
-        const collaborations = node('section', undefined, 'partner-profile-section');
-        collaborations.append(node('h3', 'CES proposals & events'));
-        if (!projects.length) {
-            collaborations.append(node('p', 'No approved or active co-hosted projects yet.'));
-        } else {
-            const projectList = node('div', undefined, 'partner-project-list');
-            projects.forEach(project => {
-                const card = node('article', undefined, 'partner-project-card');
-                const projectTitle = node('div', undefined, 'partner-project-title');
-                projectTitle.append(
-                    node('strong', project.title),
-                    node('span', project.status.replaceAll('_', ' '), `badge proposal-status status-${project.status}`)
-                );
-                const dates = project.period_start
-                    ? `${project.period_start}${project.period_end ? ` to ${project.period_end}` : ''}`
-                    : 'Dates not scheduled';
-                card.append(projectTitle, node('p', dates), node('small', project.events || 'No linked events yet.'));
-                projectList.append(card);
-            });
-            collaborations.append(projectList);
-        }
-        body.append(details, verification, collaborations);
-
-        if (currentUser.role === 'admin') {
-            const manage = node('details', undefined, 'partner-profile-admin');
-            manage.append(node('summary', 'Edit organization profile and sectors'));
-            const form = node('form', undefined, 'partner-profile-edit-form');
-            const nameLabel = node('label', 'Organization name');
-            const nameInput = node('input');
-            nameInput.name = 'organizationName';
-            nameInput.maxLength = 190;
-            nameInput.required = true;
-            nameInput.value = partner.organization_name;
-            nameLabel.append(nameInput);
-            const typeLabel = node('label', 'Organization category');
-            const typeSelect = node('select');
-            typeSelect.name = 'organizationCategory';
-            [
-                'UCC Department / Academic Unit',
-                'Local Government Unit (LGU / Barangay)',
-                'Government Agency (e.g., MMDA, DSWD)',
-                'NGO / Non-Profit Organization',
-                'Private Sector / Corporate Partner',
-                'Other'
-            ].forEach(category => typeSelect.add(new Option(category, category)));
-            typeSelect.value = partner.organization_category || 'Other';
-            typeLabel.append(typeSelect);
-            const addressLabel = node('label', 'Location / address');
-            const addressInput = node('input');
-            addressInput.name = 'address';
-            addressInput.maxLength = 500;
-            addressInput.value = partner.address || '';
-            addressLabel.append(addressInput);
-            const subcategoryLabel = node('label', 'Sector subcategories');
-            const subcategorySelect = node('select');
-            subcategorySelect.name = 'subcategoryIds';
-            subcategorySelect.multiple = true;
-            subcategorySelect.size = Math.min(6, Math.max(3, sectors.filter(item => item.subcategory_id !== null).length));
-            const assigned = new Set((partner.subcategory_ids || '').split(',').filter(Boolean));
-            sectors.filter(item => item.subcategory_id !== null).forEach(item => {
-                const option = new Option(`${item.sector_name} / ${item.subcategory_name}`, item.subcategory_id);
-                option.selected = assigned.has(String(item.subcategory_id));
-                subcategorySelect.add(option);
-            });
-            subcategoryLabel.append(subcategorySelect);
-            const save = button('Save profile', '', 'button button-primary button-small');
-            save.removeAttribute('data-action');
-            save.type = 'submit';
-            form.append(nameLabel, typeLabel, addressLabel, subcategoryLabel, save);
-            form.addEventListener('submit', async event => {
-                event.preventDefault();
-                save.disabled = true;
-                try {
-                    await request(`/directory/${partner.id}`, {
-                        method: 'PUT',
-                        body: JSON.stringify({
-                            organizationName: nameInput.value,
-                            organizationCategory: typeSelect.value,
-                            address: addressInput.value,
-                            subcategoryIds: Array.from(subcategorySelect.selectedOptions, option => option.value)
-                        })
-                    });
-                    dialog.close();
-                    await renderPage('directory');
-                    showMessage(pageMessage, 'Partner organization profile and classifications updated.');
-                } catch (error) {
-                    let errorNotice = form.querySelector('.partner-profile-error');
-                    if (!errorNotice) {
-                        errorNotice = node('p', undefined, 'partner-profile-error notice error');
-                        form.prepend(errorNotice);
-                    }
-                    errorNotice.textContent = error.message;
-                } finally {
-                    save.disabled = false;
-                }
-            });
-            body.append(manage, form);
-        }
-        const footer = node('footer', undefined, 'partner-profile-footer');
-        footer.append(button('Close', 'close-partner-profile', 'button button-quiet'));
-        content.append(header, body, footer);
-        dialog.append(content);
-        dialog.addEventListener('click', event => {
-            if (event.target === dialog || event.target.closest('[data-action="close-partner-profile"]')) dialog.close();
-        });
-        dialog.addEventListener('close', () => dialog.remove(), { once: true });
-        document.body.append(dialog);
-        dialog.showModal();
-    } catch (error) {
-        showMessage(pageMessage, error.message, 'error');
     }
 }
 
@@ -2328,10 +1985,16 @@ async function renderVolunteerCertificates() {
 async function renderVolunteerEvaluations() {
     const { evaluations, eligibleEvents } = await request('/volunteer/evaluations');
     const section = panel('Evaluation Reports', 'Submit post-event feedback after attending an event, and review your previous submissions.');
+    const requestedEventId = new URLSearchParams(window.location.search).get('event');
+    let focusEvaluationForm = false;
     if (eligibleEvents.length) {
         const form = node('form', undefined, 'panel-form volunteer-evaluation-form');
         form.innerHTML = '<label>Completed event<select name="eventId" required><option value="">Choose an event</option></select></label><label>Rating<select name="rating" required><option value="">Select 1–5</option><option value="5">5 — Excellent</option><option value="4">4 — Very good</option><option value="3">3 — Good</option><option value="2">2 — Fair</option><option value="1">1 — Needs improvement</option></select></label><label>Feedback<textarea name="feedback" rows="4" maxlength="5000" required></textarea></label><button class="button button-primary" type="submit">Submit Evaluation</button>';
         eligibleEvents.forEach(item => form.elements.eventId.add(new Option(`${item.title} · ${item.project_title}`, item.id)));
+        if (eligibleEvents.some(item => String(item.id) === requestedEventId)) {
+            form.elements.eventId.value = requestedEventId;
+            focusEvaluationForm = true;
+        }
         form.addEventListener('submit', async event => {
             event.preventDefault();
             const submit = form.querySelector('[type="submit"]');
@@ -2351,6 +2014,9 @@ async function renderVolunteerEvaluations() {
         section.append(form);
     } else {
         section.append(node('p', 'An event will become eligible for evaluation after your approved attendance is recorded.'));
+        if (requestedEventId) {
+            section.append(node('p', 'This event is not currently eligible for your evaluation. Confirm your application and attendance status with the event organizer.', 'event-evaluation-link-notice'));
+        }
     }
     const history = panel('Submitted evaluations');
     if (!evaluations.length) history.append(node('div', 'No evaluations submitted yet.', 'empty'));
@@ -2364,6 +2030,7 @@ async function renderVolunteerEvaluations() {
         history.append(record);
     });
     pageContent.append(section, history);
+    if (focusEvaluationForm) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 async function renderVolunteerDocumentations() {
@@ -2412,16 +2079,16 @@ async function renderVolunteerDocumentations() {
 }
 
 function renderPartnerEventsList(events) {
-    const section = panel('Events List', 'Scheduled events linked to your organization and approved projects.');
+    const section = panel('Events List', 'Select an event row to open its dedicated details page.');
     section.classList.add('admin-event-management-panel');
     const wrap = node('div', undefined, 'admin-event-table-wrap');
     const table = node('table', undefined, 'admin-event-table');
-    table.innerHTML = '<thead><tr><th>Event / Project</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Status</th><th>Actions</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>Event / Project</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Status</th></tr></thead>';
     const tbody = node('tbody');
     if (!events.length) {
         const row = node('tr');
         const empty = node('td', 'No events are currently linked to your organization.', 'admin-event-empty');
-        empty.colSpan = 7;
+        empty.colSpan = 6;
         row.append(empty);
         tbody.append(row);
     }
@@ -2436,27 +2103,34 @@ function renderPartnerEventsList(events) {
             node('span', end && start !== end ? `${start} – ${end}` : start),
             node('small', item.start_time ? `${String(item.start_time).slice(0, 5)} – ${String(item.end_time || '').slice(0, 5)}` : 'Time not set')
         );
-        const actions = node('div', undefined, 'admin-event-actions');
-        if (item.is_project_proposal) {
-            actions.append(button('View project details', `dossier-${item.proposal_id}`, 'button button-primary button-small'));
-        } else {
-            actions.append(
-                button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
-                button('Attendance', `dates-${item.id}`, 'button button-quiet button-small'),
-                button('Export CSV', `attendexport-${item.id}`, 'button button-quiet button-small')
-            );
-        }
         row.append(
             title,
             node('td', item.partner_name || 'UCC / University program'),
             schedule,
             node('td', item.venues || 'Venue not set', 'admin-event-venue'),
             node('td', Number(item.approved_applications || 0).toLocaleString()),
-            node('td', undefined, 'admin-event-status-cell'),
-            node('td', undefined, 'admin-event-action-cell')
+            node('td', undefined, 'admin-event-status-cell')
         );
         row.children[5].append(node('span', item.event_status, `badge status-badge event-status-${item.event_status}`));
-        row.children[6].append(actions);
+        if (item.id) row.dataset.eventId = String(item.id);
+        row.tabIndex = 0;
+        row.setAttribute('role', 'link');
+        row.setAttribute('aria-label', item.id
+            ? `Open event details for ${item.title}`
+            : `Open proposals to view ${item.title}`);
+        const openRow = () => {
+            if (item.id) {
+                navigateToEventPage(Number(item.id));
+                return;
+            }
+            window.location.assign(pageUrl('proposals'));
+        };
+        row.addEventListener('click', openRow);
+        row.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            openRow();
+        });
         tbody.append(row);
     });
     table.append(tbody);
@@ -2467,6 +2141,13 @@ function renderPartnerEventsList(events) {
 
 async function renderEventDetails(eventId) {
     const { event } = await request(`/events/${eventId}/details`);
+    const dates = event.dates || [];
+    const parseScheduledDate = value => {
+        const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+        if (!match) return null;
+        const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+        return parsed.toISOString().slice(0, 10) === value ? parsed : null;
+    };
     setHeading(event.title, `${event.project_title} · Event details`);
     const back = button('← Back to Events', 'back-to-events', 'button button-quiet event-detail-back');
     pageContent.append(back);
@@ -2488,16 +2169,15 @@ async function renderEventDetails(eventId) {
         return values;
     }, {});
     const today = `${todayParts.year}-${todayParts.month}-${todayParts.day}`;
-    const statusValue = event.dates.some(date => date.event_date === today)
+    const statusValue = dates.some(date => date.event_date === today)
         ? 'ongoing'
-        : (event.dates.some(date => date.event_date > today)
+        : (dates.some(date => date.event_date > today)
             ? 'upcoming'
             : 'completed');
     const statusBadge = node('span', statusValue, `badge status-badge event-status-${statusValue}`);
     header.append(heading, statusBadge);
     pageContent.append(header);
 
-    const dates = event.dates || [];
     const dateStart = dates[0]?.event_date || event.period_start;
     const dateEnd = dates[dates.length - 1]?.event_date || event.period_end;
     const dateRange = dateStart
@@ -2541,14 +2221,57 @@ async function renderEventDetails(eventId) {
         button('Export Attendance CSV', `attendexport-${event.id}`, 'button button-quiet button-small'),
         button('Print / Save as PDF', 'print-event-detail', 'button button-quiet button-small')
     );
+    const editButton = button('Edit Details', 'toggle-event-edit', 'button button-quiet button-small');
+    actions.append(editButton);
     details.append(actions);
+    const editForm = node('form', undefined, 'panel-form event-detail-edit-form');
+    editForm.hidden = true;
+    const dateTimeValue = value => value ? String(value).replace(' ', 'T').slice(0, 16) : '';
+    editForm.innerHTML = `
+        <label>Event title<input name="title" maxlength="190" required></label>
+        <label>Volunteer capacity<input name="capacity" type="number" min="1" max="100000" required></label>
+        <label class="wide">Description<textarea name="description" rows="3" maxlength="10000"></textarea></label>
+        <label>Applications open at<input name="applicationsOpenAt" type="datetime-local"></label>
+        <label>Applications close at<input name="applicationsCloseAt" type="datetime-local"></label>
+        <button class="button button-primary" type="submit">Save Event Details</button>`;
+    editForm.elements.title.value = event.title || '';
+    editForm.elements.capacity.value = Number(event.capacity || 1);
+    editForm.elements.description.value = event.description || '';
+    editForm.elements.applicationsOpenAt.value = dateTimeValue(event.applications_open_at);
+    editForm.elements.applicationsCloseAt.value = dateTimeValue(event.applications_close_at);
+    editButton.addEventListener('click', () => {
+        editForm.hidden = !editForm.hidden;
+        if (!editForm.hidden) editForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+    editForm.addEventListener('submit', async submitEvent => {
+        submitEvent.preventDefault();
+        if (!editForm.reportValidity()) return;
+        const submitButton = editForm.querySelector('[type="submit"]');
+        submitButton.disabled = true;
+        try {
+            await request(`/events/${event.id}/details`, {
+                method: 'PUT',
+                body: JSON.stringify(Object.fromEntries(new FormData(editForm)))
+            });
+            await renderPage('events');
+            showMessage(pageMessage, 'Event details updated.');
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+        } finally {
+            submitButton.disabled = false;
+        }
+    });
+    details.append(editForm);
     pageContent.append(details);
+    if (['admin', 'partner'].includes(currentUser.role)) {
+        await showApplications(event.id, { prepend: false });
+    }
 
-    const qrPanel = panel('Attendee Check-in QR Codes', 'Each QR code is tied to a single event date. Approved volunteers can scan the code on that date to record attendance.');
+    const qrPanel = panel('Attendee Check-in QR Codes', "A date-specific QR code is available on each scheduled event day. Approved volunteers can scan that day's code to record attendance.");
     qrPanel.classList.add('event-detail-qr-panel');
     const qrCards = node('div', undefined, 'event-detail-qr-grid');
     if (!['approved', 'active'].includes(event.proposal_status)) {
-        qrCards.append(node('p', 'Check-in QR codes are available for approved or active projects with scheduled dates.', 'empty'));
+        qrCards.append(node('p', 'Check-in QR codes are available only for approved or active projects on a scheduled event date.', 'empty'));
     } else if (!dates.length) {
         qrCards.append(node('p', 'No event dates are scheduled, so check-in QR codes are not available.', 'empty'));
     } else {
@@ -2557,6 +2280,17 @@ async function renderEventDetails(eventId) {
             card.append(node('h3', dashboardDate(date.event_date, { month: 'long', day: 'numeric', year: 'numeric' })));
             const timeVenue = [date.start_time ? `${date.start_time.slice(0, 5)} – ${date.end_time?.slice(0, 5) || '—'}` : '', date.venues || ''].filter(Boolean).join(' · ');
             if (timeVenue) card.append(node('p', timeVenue));
+            if (date.event_date !== today) {
+                card.append(node(
+                    'p',
+                    date.event_date > today
+                        ? 'QR check-in becomes available on this scheduled event date.'
+                        : 'This event date has passed. Its check-in QR code is no longer available.',
+                    'event-detail-qr-notice'
+                ));
+                qrCards.append(card);
+                return;
+            }
             const loading = node('div', 'Preparing secure QR code…', 'event-detail-qr-loading');
             card.append(loading);
             qrCards.append(card);
@@ -2578,6 +2312,63 @@ async function renderEventDetails(eventId) {
     }
     qrPanel.append(qrCards);
     pageContent.append(qrPanel);
+
+    const evaluationPanel = panel('Post-event Evaluation QR Code', 'This QR code is available only on the final scheduled event day. Volunteers must sign in and have an approved application with recorded attendance to submit feedback.');
+    evaluationPanel.classList.add('event-detail-qr-panel');
+    const evaluationCards = node('div', undefined, 'event-detail-qr-grid');
+    const finalScheduledDate = dates.reduce((latest, date) => {
+        const parsed = parseScheduledDate(date.event_date);
+        return parsed && (!latest || parsed > latest.date) ? { date: parsed, value: date.event_date } : latest;
+    }, null);
+    const finalEventDate = finalScheduledDate?.value || '';
+    const finalDateLabel = finalEventDate
+        ? dashboardDate(finalEventDate, { month: 'long', day: 'numeric', year: 'numeric' })
+        : '';
+    if (!['approved', 'active'].includes(event.proposal_status) || !finalScheduledDate) {
+        evaluationCards.append(node(
+            'p',
+            !finalScheduledDate
+                ? 'Schedule valid event dates before an evaluation QR code can be prepared.'
+                : 'Evaluation QR codes are available only for approved or active events.',
+            'empty'
+        ));
+    } else if (parseScheduledDate(today) < finalScheduledDate.date) {
+        const locked = node('p', undefined, 'event-evaluation-status');
+        locked.append(
+            node('span', 'Locked', 'badge event-evaluation-locked'),
+            node('span', `Evaluation QR unlocks on the final event day, ${finalDateLabel}.`)
+        );
+        evaluationCards.append(locked);
+    } else if (parseScheduledDate(today) > finalScheduledDate.date) {
+        evaluationCards.append(node(
+            'p',
+            `The Evaluation QR was available only on the final event day, ${finalDateLabel}.`,
+            'event-detail-qr-notice'
+        ));
+    } else {
+        const card = node('article', undefined, 'event-detail-qr-card');
+        card.append(node('h3', 'Volunteer evaluation'));
+        card.append(node('p', 'Scan to open the volunteer evaluation form for this event.'));
+        const loading = node('div', 'Preparing evaluation QR code…', 'event-detail-qr-loading');
+        card.append(loading);
+        evaluationCards.append(card);
+        request(`/events/${event.id}/evaluation-qr`).then(result => {
+            const image = node('img');
+            image.src = result.qrImage;
+            image.alt = `Evaluation QR code for ${event.title}`;
+            image.className = 'event-detail-qr-image';
+            const download = node('a', 'Download evaluation QR image', 'button button-quiet button-small');
+            download.href = result.qrImage;
+            download.download = `ucc-ces-event-${event.id}-evaluation-qr.png`;
+            download.setAttribute('aria-label', `Download evaluation QR code for ${event.title}`);
+            loading.replaceWith(image, download);
+        }).catch(error => {
+            loading.className = 'event-detail-qr-error';
+            loading.textContent = `Evaluation QR code unavailable: ${error.message}`;
+        });
+    }
+    evaluationPanel.append(evaluationCards);
+    pageContent.append(evaluationPanel);
 }
 
 function renderAdminEventsDashboard(data) {
@@ -2609,7 +2400,7 @@ function renderAdminEventsDashboard(data) {
     toolbar.append(searchLabel, statusLabel, partnerLabel);
     const tableWrap = node('div', undefined, 'admin-event-table-wrap');
     const table = node('table', undefined, 'admin-event-table');
-    table.innerHTML = '<thead><tr><th>Event / Program</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Attendance</th><th>Status</th><th>Actions</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>Event / Program</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Attendance</th><th>Status</th></tr></thead>';
     const tbody = node('tbody');
     table.append(tbody);
     tableWrap.append(table);
@@ -2620,16 +2411,22 @@ function renderAdminEventsDashboard(data) {
         tbody.replaceChildren();
         const query = search.value.trim().toLocaleLowerCase();
         const selectedPartner = partner.value;
+        const normalizeStatus = value => {
+            const normalized = String(value || '').trim().toLocaleLowerCase().replaceAll(' ', '_');
+            if (normalized === 'active') return 'ongoing';
+            if (normalized === 'approved' || normalized === 'scheduled') return 'upcoming';
+            return normalized;
+        };
         const filtered = data.events.filter(item => {
             const matchesText = !query || `${item.title} ${item.project_title} ${item.partner_name || ''}`.toLocaleLowerCase().includes(query);
-            const matchesStatus = status.value === 'all' || item.event_status === status.value;
-            const matchesPartner = !selectedPartner || (item.partner_name || '').split(', ').includes(selectedPartner);
+            const matchesStatus = status.value === 'all' || normalizeStatus(item.event_status || item.proposal_status) === normalizeStatus(status.value);
+            const matchesPartner = !selectedPartner || (item.partner_name || '').split(/\s*,\s*/).some(name => name.localeCompare(selectedPartner, undefined, { sensitivity: 'accent' }) === 0);
             return matchesText && matchesStatus && matchesPartner;
         });
         if (!filtered.length) {
             const row = node('tr');
             const cell = node('td', 'No events match the selected filters.', 'admin-event-empty');
-            cell.colSpan = 8;
+            cell.colSpan = 7;
             row.append(cell);
             tbody.append(row);
             return;
@@ -2649,19 +2446,8 @@ function renderAdminEventsDashboard(data) {
             const venueCell = node('td', item.venues || 'Venue not set', 'admin-event-venue');
             const volunteers = Number(item.registered_volunteers || 0);
             const attendance = Number(item.attendance_headcount || 0);
-            const statusBadge = node('span', item.event_status, `badge status-badge event-status-${item.event_status}`);
-            const actions = node('div', undefined, 'admin-event-actions');
-            if (item.is_project_proposal) {
-                actions.append(button('View project details', `dossier-${item.proposal_id}`, 'button button-quiet button-small'));
-            } else {
-                actions.append(
-                    button('View details', `viewevent-${item.id}`, 'button button-primary button-small'),
-                    button('View Attendance Log', `dates-${item.id}`, 'button button-quiet button-small'),
-                    button('Manage Volunteers', `applications-${item.id}`, 'button button-quiet button-small'),
-                    button('Export CSV', `attendexport-${item.id}`, 'button button-primary button-small'),
-                    button('Print / PDF', `attendanceprint-${item.id}`, 'button button-quiet button-small')
-                );
-            }
+            const normalizedStatus = normalizeStatus(item.event_status || item.proposal_status);
+            const statusBadge = node('span', normalizedStatus, `badge status-badge event-status-${normalizedStatus}`);
             row.append(
                 eventCell,
                 partnerCell,
@@ -2669,12 +2455,43 @@ function renderAdminEventsDashboard(data) {
                 venueCell,
                 node('td', volunteers.toLocaleString()),
                 node('td', attendance.toLocaleString()),
-                node('td', undefined, 'admin-event-status-cell'),
-                node('td', undefined, 'admin-event-action-cell')
+                node('td', undefined, 'admin-event-status-cell')
             );
             row.children[6].append(statusBadge);
-            row.children[7].append(actions);
-            row.dataset.eventId = item.id;
+            if (item.id) row.dataset.eventId = String(item.id);
+            if (item.is_project_proposal) row.dataset.proposalId = String(item.proposal_id);
+            row.tabIndex = 0;
+            row.setAttribute('role', 'link');
+            row.setAttribute('aria-label', `Open event details for ${item.title}`);
+            const openRow = async () => {
+                if (item.id) {
+                    navigateToEventPage(Number(item.id));
+                    return;
+                }
+                if (!item.proposal_id || row.dataset.opening === 'true') {
+                    showMessage(pageMessage, 'This row does not have a valid event record.', 'error');
+                    return;
+                }
+                row.dataset.opening = 'true';
+                row.setAttribute('aria-busy', 'true');
+                try {
+                    const result = await request(`/proposals/${item.proposal_id}/event`, {
+                        method: 'POST',
+                        body: '{}'
+                    });
+                    navigateToEventPage(Number(result.id));
+                } catch (error) {
+                    delete row.dataset.opening;
+                    row.removeAttribute('aria-busy');
+                    showMessage(pageMessage, error.message, 'error');
+                }
+            };
+            row.addEventListener('click', openRow);
+            row.addEventListener('keydown', event => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                openRow();
+            });
             tbody.append(row);
         });
     };
@@ -2739,10 +2556,11 @@ function renderAdminEventCalendar(container, month, events) {
             eventButton.title = `${item.project_title}${item.partner_name ? ` · ${item.partner_name}` : ''} · ${item.event_status}`;
             eventButton.addEventListener('click', event => {
                 event.stopPropagation();
-                const destination = item.is_project_proposal
-                    ? showProjectDossier(Number(item.proposal_id))
-                    : navigateToEvent(Number(item.id));
-                destination.catch(error => showMessage(pageMessage, error.message, 'error'));
+                if (item.is_project_proposal) {
+                    showMessage(pageMessage, 'This approved project does not have a scheduled event record yet.');
+                    return;
+                }
+                navigateToEvent(Number(item.id)).catch(error => showMessage(pageMessage, error.message, 'error'));
             });
             cell.append(eventButton);
         });
@@ -3305,7 +3123,7 @@ async function renderReports() {
     };
     refreshStatusOptions();
     form.elements.module.addEventListener('change', refreshStatusOptions);
-    const [partnersResult, categoriesResult] = await Promise.all([request('/directory'), request('/categories')]);
+    const [partnersResult, categoriesResult] = await Promise.all([request('/collaborators/partners'), request('/categories')]);
     const partnerSelect = form.elements.partner;
     partnersResult.partners.forEach(partner => partnerSelect.add(new Option(partner.organization_name, partner.id)));
     const categorySelect = form.elements.category;
@@ -3432,9 +3250,9 @@ pageContent.addEventListener('click', async event => {
             await request('/notifications/read-all', { method: 'PUT', body: '{}' });
             await renderPage('notifications');
         } else if (action === 'apply') {
-            await request(`/events/${id}/apply`, { method: 'POST', body: '{}' });
-            showMessage(pageMessage, 'Application submitted for organizer review.');
-            await renderPage('events');
+            const result = await request(`/events/${id}/apply`, { method: 'POST', body: '{}' });
+            await renderPage(result.status === 'approved' ? 'joined-events' : 'applications');
+            showMessage(pageMessage, result.message || 'Volunteer registration saved.');
         } else if (action === 'volcalendar') {
             const row = pageContent.querySelector(`tr[data-event-id="${id}"]`);
             if (row) {
@@ -3999,7 +3817,7 @@ async function showCertificates(eventId) {
     pageContent.prepend(section);
 }
 
-async function showApplications(eventId) {
+async function showApplications(eventId, { prepend = true } = {}) {
     const { applications } = await request(`/events/${eventId}/applications`);
     const section = panel('Volunteer applications');
     section.classList.add('applications-panel');
@@ -4031,26 +3849,93 @@ async function showApplications(eventId) {
     const existing = pageContent.querySelector('.applications-panel');
     existing?.remove();
     section.classList.add('applications-panel');
-    pageContent.prepend(section);
+    if (prepend) pageContent.prepend(section);
+    else pageContent.append(section);
 }
 
 async function showInvitePartnerForm(proposalId) {
-    const { partners } = await request('/directory');
-    const section = panel('Invite a partner', 'The selected approved organization will receive a collaboration invitation.');
+    const { partners } = await request('/collaborators/partners');
+    const section = panel(
+        'Invite a collaborator',
+        currentUser.role === 'admin'
+            ? 'Invite an approved partner or create a new approved account that can collaborate immediately.'
+            : 'Invite an approved partner, or create a new account that will become available after CES Admin approval.'
+    );
     const form = node('form', undefined, 'panel-form');
-    form.innerHTML = '<label>Partner organization<select name="partnerId" required><option value="">Choose an organization</option></select></label><button class="button button-primary" type="submit">Send invitation</button>';
+    form.innerHTML = `
+        <label>Partner organization
+            <select name="partnerId" required>
+                <option value="">Choose an approved organization</option>
+                <option value="new">Add New Partner Account</option>
+            </select>
+        </label>
+        <fieldset class="collaborator-account-fields" data-new-partner-fields disabled hidden>
+            <legend>New partner account</legend>
+            <div class="form-grid">
+                <label>Organization name<input name="organizationName" maxlength="190" required></label>
+                <label>Organization category
+                    <select name="organizationCategory" required>
+                        <option value="">Choose a category</option>
+                        <option value="UCC Department / Academic Unit">UCC Department / Academic Unit</option>
+                        <option value="Local Government Unit (LGU / Barangay)">Local Government Unit (LGU / Barangay)</option>
+                        <option value="Government Agency (e.g., MMDA, DSWD)">Government Agency</option>
+                        <option value="NGO / Non-Profit Organization">NGO / Non-Profit Organization</option>
+                        <option value="Private Sector / Corporate Partner">Private Sector / Corporate Partner</option>
+                    </select>
+                </label>
+                <label>Representative first name<input name="firstName" maxlength="100" autocomplete="given-name" required></label>
+                <label>Representative last name<input name="lastName" maxlength="100" autocomplete="family-name" required></label>
+                <label>Official designation / role<input name="officialDesignation" maxlength="190" required></label>
+                <label>Contact number<input name="contactNumber" type="tel" maxlength="40" autocomplete="tel" required></label>
+                <label>Email address<input name="email" type="email" maxlength="190" autocomplete="email" required></label>
+                <label>Password <span class="field-hint">At least 12 characters</span><input name="password" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+                <label>Confirm password<input name="confirmation" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+            </div>
+        </fieldset>
+        <button class="button button-primary" type="submit" data-collaborator-submit>Send invitation</button>`;
     partners.forEach(partner => form.elements.partnerId.add(new Option(partner.organization_name, partner.id)));
+    const fields = form.querySelector('[data-new-partner-fields]');
+    const submit = form.querySelector('[data-collaborator-submit]');
+    form.elements.partnerId.addEventListener('change', () => {
+        const creating = form.elements.partnerId.value === 'new';
+        fields.hidden = !creating;
+        fields.disabled = !creating;
+        submit.textContent = creating
+            ? (currentUser.role === 'admin' ? 'Create Account & Send Invitation' : 'Create Pending Account')
+            : 'Send invitation';
+    });
     form.addEventListener('submit', async event => {
         event.preventDefault();
+        if (!form.reportValidity()) return;
+        submit.disabled = true;
         try {
-            await request(`/proposals/${proposalId}/collaborators`, {
-                method: 'POST',
-                body: JSON.stringify({ partnerId: form.elements.partnerId.value })
-            });
+            const creating = form.elements.partnerId.value === 'new';
+            const result = creating
+                ? await request(`/proposals/${proposalId}/collaborators/create-account`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        organizationName: form.elements.organizationName.value,
+                        organizationCategory: form.elements.organizationCategory.value,
+                        firstName: form.elements.firstName.value,
+                        lastName: form.elements.lastName.value,
+                        officialDesignation: form.elements.officialDesignation.value,
+                        contactNumber: form.elements.contactNumber.value,
+                        email: form.elements.email.value,
+                        password: form.elements.password.value,
+                        confirmation: form.elements.confirmation.value
+                    })
+                })
+                : await request(`/proposals/${proposalId}/collaborators`, {
+                    method: 'POST',
+                    body: JSON.stringify({ partnerId: form.elements.partnerId.value })
+                });
             section.remove();
-            showMessage(pageMessage, 'Collaboration invitation sent.');
+            showMessage(pageMessage, result.message || 'Collaboration invitation sent.');
+            await renderPage('proposals');
         } catch (error) {
             showMessage(pageMessage, error.message, 'error');
+        } finally {
+            submit.disabled = false;
         }
     });
     const existing = pageContent.querySelector('.invite-partner-panel');

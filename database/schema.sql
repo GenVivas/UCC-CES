@@ -107,6 +107,8 @@ CREATE TABLE proposals (
     target_outputs TEXT NOT NULL,
     possible_risks TEXT NOT NULL,
     expected_private_partnerships TEXT NULL,
+    accepts_volunteers TINYINT(1) NOT NULL DEFAULT 1,
+    volunteer_approval_mode ENUM('auto', 'manual') NOT NULL DEFAULT 'manual',
     status ENUM('draft', 'submitted', 'under_review', 'revision', 'approved', 'active', 'rejected') NOT NULL DEFAULT 'draft',
     period_start DATE NULL,
     period_end DATE NULL,

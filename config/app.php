@@ -5,6 +5,7 @@ $config = [
     'name' => 'UCC-CES',
     'timezone' => 'Asia/Manila',
     'base_path' => '',
+    'app_url' => getenv('CES_APP_URL') ?: '',
     'app_key' => getenv('CES_APP_KEY') ?: '',
     'database' => [
         'host' => getenv('CES_DB_HOST') ?: '127.0.0.1',
