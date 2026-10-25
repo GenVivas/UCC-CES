@@ -4,7 +4,7 @@ RewriteEngine On
 RewriteRule ^api(?:/(.*))?$ api.php [QSA,L]
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
-RewriteRule ^ index.html [L]
+RewriteRule ^ index.php [L]
 
 <FilesMatch "\.(env|ini|log|sql|md)$">
     Require all denied

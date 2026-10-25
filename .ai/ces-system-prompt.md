@@ -24,7 +24,7 @@ The user provides high-level intent or domain requirements. You autonomously tak
 
 ### B. Accounts, Roles & RBAC Matrix
 1. **CES Admin:** Global system access, directory management, final proposal review/approval, partner matching, and system-wide reporting.
-2. **Proposer / Partner Account:** Represents External Partners (NGA, LGU, NGO, Private Sector, BPO, Church), UCC Departments/Colleges, or Barangays. Supports self-registration with CES Admin approval or direct invitation.
+2. **Proponent / Partner Account:** Represents External Partners (NGA, LGU, NGO, Private Sector, BPO, Church), UCC Departments/Colleges, or Barangays. Supports self-registration with CES Admin approval or direct invitation.
 3. **Volunteers (Multi-Type Registration):**
    * Shared details: First Name, Last Name, Email, Contact Number, Password.
    * **Student:** Requires Student Number (Validated format: 8 digits + `-N` for Congressional/Bagong Silang/Camarin or `-S` for Main Campus, e.g., `12345678-N`). Automatically pre-detect and auto-select campus base on suffix while keeping the campus field fully editable for user corrections. Requires School ID/Reg Form, School/Campus, Course/Program, and optional Year/Section.
@@ -32,14 +32,14 @@ The user provides high-level intent or domain requirements. You autonomously tak
    * **Barangay Tanod:** Requires Tanod ID and assigned Barangay.
    * **Civilian:** Requires valid Government Photo ID.
    * **Other:** Requires appropriate affiliation ID/proof and organization name.
-   * *Account Approval vs. Event Application:* Approved volunteer accounts do NOT automatically enroll a volunteer into events. Volunteers apply per event; event capacity is configured by the proposer, and applications are approved/rejected per event by the proposer/organizer.
+   * *Account Approval vs. Event Application:* Approved volunteer accounts do NOT automatically enroll a volunteer into events. Volunteers apply per event; event capacity is configured by the proponent, and applications are approved/rejected per event by the proponent/organizer.
 
 ### C. Proposal to Active Project Lifecycle
 * **Status Flow:** `Draft` -> `Submitted` -> `Under Review` -> `Revision` -> `Under Review` -> `Approved` -> `Active` (Alternative terminal status: `Rejected`).
 * **Multi-Partner Collaboration:**
   * Supports 3+ collaborating organizations per proposal.
   * CES Admin coordinates collaborators. Each invited organization must explicitly confirm/accept in-system.
-  * If an invited collaborator declines, CES Admin can replace them without resetting or requiring proposal resubmission from the primary proposer.
+  * If an invited collaborator declines, CES Admin can replace them without resetting or requiring proposal resubmission from the primary proponent.
 * **Activation Requirement:** An `Approved` proposal ONLY transitions to `Active` status when a signed MOA or MOU is attached. Drafts or unsigned agreements are strictly invalid.
 * **Initial Proposal Attachments Required (Strict Validation):**
   1. Signed Proposal Letter
@@ -70,7 +70,7 @@ The user provides high-level intent or domain requirements. You autonomously tak
   * Volunteer account approvals and event application approvals/rejections.
 
 ### G. Event-Date QR Attendance System
-* **Display & Scanning:** The QR code is rendered inside the proposer/organizer account. Volunteers scan using their own authenticated session/mobile view.
+* **Display & Scanning:** The QR code is rendered inside the proponent/organizer account. Volunteers scan using their own authenticated session/mobile view.
 * **Date-Locked Dynamic QR:** A single QR code is generated per Event Date. All activities on the same date share that date's QR.
 * **Validity Window:** A date's QR is valid ONLY on that specific calendar date. It cannot be scanned on prior or future dates.
 * **Deduplication & Auto-Absence:**
@@ -83,7 +83,7 @@ The user provides high-level intent or domain requirements. You autonomously tak
 * **Dual Reporting Views:**
   1. **Module Reports:** Cross-project monitoring (Proposals, Partners, Events, Volunteer Applications, Daily Attendance, Participants, Evaluations, Certificates, Documentation).
   2. **Consolidated Project Report:** A unified project dossier capturing summary, partners, activity schedules, attendance rates, volunteer roster, participant totals, documentation list, and evaluation metrics.
-* **Data Scoping:** CES Admin views system-wide data; Proposers/Partners view ONLY projects they participate in.
+* **Data Scoping:** CES Admin views system-wide data; Proponents/Partners view ONLY projects they participate in.
 * **Exports & Filters:** Support PDF and CSV exports. Mandatory `From` and `To` date range filtering with dynamically applicable criteria (Partner, Category, Status, Search).
 
 ---

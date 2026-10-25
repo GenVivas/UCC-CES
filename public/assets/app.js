@@ -31,6 +31,7 @@ let csrfToken = '';
 let currentUser = null;
 let currentPage = 'overview';
 let currentEventId = null;
+let currentProposalId = null;
 let qrStream = null;
 let qrTimer = 0;
 let qrVideo = null;
@@ -49,6 +50,7 @@ function localDateInputValue(value = new Date()) {
 
 function pageFromLocation() {
     currentEventId = null;
+    currentProposalId = null;
     const legacyTab = new URLSearchParams(window.location.search).get('tab');
     if (Object.hasOwn(pageRoutes, legacyTab)) return legacyTab;
     let path = window.location.pathname.replace(/\/+$/, '');
@@ -61,6 +63,9 @@ function pageFromLocation() {
     const route = segments[0];
     if (route === 'portal' || route === 'login') return 'overview';
     currentEventId = route === 'events' && /^\d+$/.test(segments[1] || '')
+        ? Number(segments[1])
+        : null;
+    currentProposalId = route === 'proposals' && /^\d+$/.test(segments[1] || '')
         ? Number(segments[1])
         : null;
     const page = Object.keys(pageRoutes).find(key => pageRoutes[key] === (route || ''));
@@ -85,8 +90,22 @@ function navigateToPage(page, { replace = false } = {}) {
         window.history[replace ? 'replaceState' : 'pushState']({ page }, '', url);
     }
     currentEventId = null;
+    currentProposalId = null;
     syncNavigation(page);
     return renderPage(page);
+}
+
+function navigateToProposal(proposalId) {
+    const id = Number(proposalId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error('A valid proposal is required.');
+    const url = `${pageUrl('proposals')}/${id}`;
+    if (window.location.pathname !== url) {
+        window.history.pushState({ page: 'proposals', proposalId: id }, '', url);
+    }
+    currentProposalId = id;
+    currentEventId = null;
+    syncNavigation('proposals');
+    return renderPage('proposals');
 }
 
 function navigateToEvent(eventId) {
@@ -1293,6 +1312,10 @@ function renderAdminOverview(overview) {
 }
 
 async function renderProposals() {
+    if (currentProposalId) {
+        await renderProposalDetails(currentProposalId);
+        return;
+    }
     if (currentUser.role === 'partner') {
         const [{ categories }, { partners }] = await Promise.all([
             request('/categories'),
@@ -1305,92 +1328,40 @@ async function renderProposals() {
         pageContent.append(section);
     }
     const { proposals } = await request('/proposals');
-    const section = panel('Proposal register', 'Search proposals by title or proposer and filter by current status.');
+    const section = panel('Proposal register', 'Search proposals by title or proponent and filter by current status.');
     section.classList.add('proposal-register');
+    if (currentUser.role === 'admin') {
+        const toolbar = node('div', undefined, 'proposal-register-toolbar');
+        toolbar.append(button('+ Create Proposal', 'createproposal', 'button button-primary'));
+        section.append(toolbar);
+    }
     const filters = node('div', undefined, 'proposal-filters');
-    filters.innerHTML = '<label>Search<input name="search" type="search" placeholder="Search title or proposer"></label><label>Status<select name="status"><option value="">All statuses</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="revision">Needs revision</option><option value="approved">Approved</option><option value="active">Activated</option><option value="rejected">Rejected</option></select></label>';
+    filters.innerHTML = '<label>Search<input name="search" type="search" placeholder="Search title or proponent"></label><label>Status<select name="status"><option value="">All statuses</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="revision">Needs revision</option><option value="approved">Approved</option><option value="active">Activated</option><option value="rejected">Rejected</option></select></label>';
     const tableWrap = node('div', undefined, 'proposal-table-wrap');
     const table = node('table', undefined, 'proposal-table');
-    table.innerHTML = '<thead><tr><th scope="col">Proposal</th><th scope="col">Proposer</th><th scope="col">Status</th><th scope="col">Project dates</th><th scope="col">Updated</th><th scope="col">Actions</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th scope="col">Proposal Title</th><th scope="col">Proponent</th><th scope="col">Expected Private / External Partnerships</th><th scope="col">Project Dates &amp; Time</th><th scope="col">Updated</th></tr></thead>';
     const body = node('tbody');
     const proposalRows = [];
     proposals.forEach(proposal => {
         const row = node('tr');
         row.dataset.status = proposal.status;
-        row.dataset.search = `${proposal.title} ${proposal.first_name} ${proposal.last_name}`.toLocaleLowerCase();
+        row.dataset.proposalId = String(proposal.id);
+        row.dataset.search = `${proposal.title} ${proposal.organization_name || ''} ${proposal.first_name} ${proposal.last_name}`.toLocaleLowerCase();
+        row.tabIndex = 0;
+        row.setAttribute('role', 'link');
+        row.setAttribute('aria-label', `Open proposal details for ${proposal.title}`);
         const titleCell = node('td', undefined, 'proposal-title-cell');
         titleCell.append(node('strong', proposal.title));
-        const attachmentCount = node('small', `${Number(proposal.attachment_count || 0)} document(s) attached`, 'proposal-attachment-count');
-        attachmentCount.dataset.attachmentCount = '';
-        titleCell.append(attachmentCount);
-        const proposerCell = node('td', `${proposal.first_name} ${proposal.last_name}`);
-        const statusLabel = {
-            draft: 'Draft',
-            submitted: 'Submitted',
-            under_review: 'Under review',
-            revision: 'Needs revision',
-            approved: 'Approved',
-            active: 'Activated',
-            rejected: 'Rejected'
-        }[proposal.status] || dashboardStatusLabel(proposal.status);
-        const statusCell = node('td');
-        statusCell.append(node('span', statusLabel, `badge proposal-status status-${proposal.status}`));
-        if (currentUser.role === 'partner' && proposal.user_invitation_status === 'pending') {
-            statusCell.append(node('span', 'Invitation pending', 'badge status-badge'));
-        }
-        if (proposal.review_notes) {
-            statusCell.append(node('small', `Review note: ${proposal.review_notes}`, 'proposal-review-note'));
-        }
+        const proponentCell = node('td', undefined, 'proposal-proponent-cell');
+        proponentCell.append(node('strong', proposal.organization_name || `${proposal.first_name} ${proposal.last_name}`));
+        if (proposal.organization_name) proponentCell.append(node('small', `${proposal.first_name} ${proposal.last_name}`));
+        const partnershipsCell = node('td', proposal.expected_private_partnerships || 'Not specified', 'proposal-partnership-cell');
         const projectDates = proposal.period_start
-            ? `${dashboardDate(proposal.period_start, { month: 'short', day: 'numeric', year: 'numeric' })}${proposal.period_end ? ` – ${dashboardDate(proposal.period_end, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}`
+            ? `${dashboardDate(proposal.period_start, { month: 'short', day: 'numeric', year: 'numeric' })}${proposal.period_end ? ` – ${dashboardDate(proposal.period_end, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}${proposal.scheduled_time ? ` · ${proposal.scheduled_time}` : ''}${proposal.stated_duration ? ` · ${proposal.stated_duration}` : ''}`
             : 'Not scheduled';
         const datesCell = node('td', projectDates);
         const updatedCell = node('td', dashboardDate(proposal.updated_at, { month: 'short', day: 'numeric', year: 'numeric' }));
-        const actionsCell = node('td');
-        const actions = node('div', undefined, 'record-actions');
-        if (['admin', 'partner'].includes(currentUser.role)) {
-            actions.append(button('View', `dossier-${proposal.id}`, 'button button-quiet button-small'));
-        }
-        if (currentUser.role === 'partner' && Number(proposal.owner_user_id) === currentUser.id) {
-            if (proposal.status === 'draft') {
-                actions.append(button('Edit', `editproposal-${proposal.id}`, 'button button-quiet button-small'));
-                actions.append(button('Add document', `upload-${proposal.id}`, 'button button-quiet button-small'));
-                actions.append(button('Submit', `submit-${proposal.id}`, 'button button-primary button-small'));
-            } else if (proposal.status === 'revision') {
-                actions.append(button('Edit Proposal', `editproposal-${proposal.id}`, 'button button-primary button-small'));
-                actions.append(button('Add document', `upload-${proposal.id}`, 'button button-quiet button-small'));
-                actions.append(button('Resubmit for Review', `submit-${proposal.id}`, 'button button-primary button-small'));
-            }
-        }
-        if (currentUser.role === 'partner' && proposal.user_relationship === 'collaborator' && proposal.user_invitation_status === 'pending') {
-            actions.append(
-                button('Accept invitation', `collaborate-${proposal.id}-accepted`, 'button button-primary button-small'),
-                button('Decline', `collaborate-${proposal.id}-declined`, 'button button-danger button-small')
-            );
-        }
-        const canInviteCollaborator = proposal.status === 'approved' &&
-            (currentUser.role === 'admin' ||
-                (currentUser.role === 'partner' && Number(proposal.owner_user_id) === currentUser.id));
-        if (canInviteCollaborator) {
-            actions.append(button('Invite Partner', `invitepartner-${proposal.id}`, 'button button-quiet button-small'));
-        }
-        if (currentUser.role === 'admin' && ['submitted', 'under_review'].includes(proposal.status)) {
-            const reviewNote = node('textarea');
-            reviewNote.rows = 2;
-            reviewNote.maxLength = 2000;
-            reviewNote.placeholder = proposal.status === 'under_review'
-                ? 'Revision feedback (required when requesting changes)'
-                : 'Review note (required when requesting changes)';
-            reviewNote.setAttribute('aria-label', `Review note for ${proposal.title}`);
-            actions.append(reviewNote);
-            if (proposal.status === 'submitted') actions.append(button('Start review', `review-${proposal.id}-under_review`));
-            actions.append(button('Request revision', `review-${proposal.id}-revision`), button('Approve', `review-${proposal.id}-approved`), button('Reject', `review-${proposal.id}-rejected`, 'button button-danger button-small'));
-        }
-        if (currentUser.role === 'admin' && proposal.status === 'approved') {
-            actions.append(button('Activate', `review-${proposal.id}-active`, 'button button-primary button-small'));
-        }
-        actionsCell.append(actions);
-        row.append(titleCell, proposerCell, statusCell, datesCell, updatedCell, actionsCell);
+        row.append(titleCell, proponentCell, partnershipsCell, datesCell, updatedCell);
         proposalRows.push(row);
     });
     table.append(body);
@@ -1423,9 +1394,41 @@ async function renderProposals() {
         proposalPage = 1;
         renderProposalRows();
     });
+    body.addEventListener('click', event => {
+        if (event.target.closest('button, a, input, select, textarea')) return;
+        const row = event.target.closest('tr[data-proposal-id]');
+        if (row) navigateToProposal(row.dataset.proposalId);
+    });
+    body.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        const row = event.target.closest('tr[data-proposal-id]');
+        if (!row) return;
+        event.preventDefault();
+        navigateToProposal(row.dataset.proposalId);
+    });
     section.append(filters, tableWrap, empty);
     pageContent.append(section);
     renderProposalRows();
+}
+
+async function openAdminProposalForm() {
+    const [{ categories }, { partners }] = await Promise.all([
+        request('/categories'),
+        request('/collaborators/partners')
+    ]);
+    const section = panel(
+        'Create Proposal',
+        'Enter the project brief for an approved partner. Upload the required signed proposal letter and project brief before submitting it for review.'
+    );
+    section.classList.add('proposal-create-panel');
+    const form = createProposalWizard(categories, partners);
+    form.querySelector('[data-wizard-submit]').textContent = 'Create Draft Proposal';
+    const cancel = button('Cancel', 'cancelproposalcreate', 'button button-quiet');
+    form.querySelector('.proposal-wizard-actions').append(cancel);
+    form.addEventListener('submit', createProposal);
+    section.append(form);
+    pageContent.prepend(section);
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function createProposalWizard(categories, partners, proposal = null) {
@@ -1438,6 +1441,7 @@ function createProposalWizard(categories, partners, proposal = null) {
         </div>
         <section class="proposal-wizard-step" data-wizard-step="0">
             <h3>1. General Project Information</h3>
+            ${currentUser.role === 'admin' ? '<label class="wide">Primary Proponent / Partner<select name="ownerUserId" data-proposal-owner required><option value="">Choose an approved partner</option></select></label>' : ''}
             <label>Project Name<input name="title" maxlength="190" required></label>
             <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
             <label class="wide">Project Venue / Location<input name="venue" maxlength="255" placeholder="Enter a venue or leave blank if it is still to be determined"></label>
@@ -1478,6 +1482,11 @@ function createProposalWizard(categories, partners, proposal = null) {
             <button type="button" class="button button-primary" data-wizard-next>Next: Activity Components →</button>
             <button type="submit" class="button button-primary" data-wizard-submit hidden>Save Draft</button>
         </div>`;
+    const ownerSelect = form.querySelector('[data-proposal-owner]');
+    if (ownerSelect) {
+        partners.forEach(partner => ownerSelect.add(new Option(partner.organization_name, partner.id)));
+        if (proposal?.ownerUserId) ownerSelect.value = String(proposal.ownerUserId);
+    }
     const classificationOptions = form.querySelector('[data-classification-options]');
     ['CES', 'Student Development'].forEach(value => {
         const label = node('label', value);
@@ -1807,6 +1816,7 @@ function updateProposalBudgetTotal(form) {
 function serializeProposalWizard(form) {
     const formData = new FormData(form);
     const data = Object.fromEntries(formData);
+    if (form.elements.ownerUserId) data.ownerUserId = form.elements.ownerUserId.value;
     data.acceptsVolunteers = form.elements.acceptsVolunteers.checked;
     data.volunteerApprovalMode = form.elements.volunteerApprovalMode.value;
     data.venue = form.elements.venue.value.trim();
@@ -1913,7 +1923,12 @@ async function createProposal(event) {
     try {
         await request('/proposals', { method: 'POST', body: JSON.stringify(data) });
         await renderPage('proposals');
-        showMessage(pageMessage, 'Draft saved.');
+        showMessage(
+            pageMessage,
+            currentUser.role === 'admin'
+                ? 'Proposal draft created. Upload the required documents, then submit it for review.'
+                : 'Draft saved.'
+        );
     } catch (error) {
         showMessage(pageMessage, error.message, 'error');
     } finally {
@@ -2189,7 +2204,7 @@ async function renderVolunteerJoinedEvents() {
     const section = panel('Joined Events', 'Your approved registrations, event schedules, and secure event-day QR check-in.');
     const tableWrap = node('div', undefined, 'volunteer-joined-table-wrap');
     const table = node('table', undefined, 'volunteer-joined-table');
-    table.innerHTML = '<thead><tr><th scope="col">Event &amp; host</th><th scope="col">Scheduled date &amp; time</th><th scope="col">Attendance</th><th scope="col">Check-in</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th scope="col">Event &amp; host</th><th scope="col">Scheduled date &amp; time</th><th scope="col">Attendance</th><th scope="col">Attendance QR</th></tr></thead>';
     const body = node('tbody');
     const joinedRows = [];
     const scheduleByEvent = new Map();
@@ -2222,14 +2237,19 @@ async function renderVolunteerJoinedEvents() {
             }
             const attendanceCell = node('td');
             const status = schedule?.attendance_status || 'registered';
-            attendanceCell.append(node('span', status, `badge status-badge status-${status}`));
+            const attendanceState = schedule?.checked_out_at
+                ? 'Completed'
+                : schedule?.scanned_at
+                    ? 'Timed in only'
+                    : status;
+            attendanceCell.append(node('span', attendanceState, `badge status-badge status-${status}`));
             const actionCell = node('td');
-            if (schedule?.attendance_status === 'present') {
-                const present = button('Present', '', 'button button-small volunteer-present-button');
-                present.disabled = true;
-                actionCell.append(present);
+            if (schedule?.checked_out_at) {
+                const completed = button('Completed', '', 'button button-small volunteer-present-button');
+                completed.disabled = true;
+                actionCell.append(completed);
             } else if (schedule) {
-                const scan = button('Scan QR Code', '', 'button button-primary button-small');
+                const scan = button(schedule.scanned_at ? 'Scan for Time Out' : 'Scan QR Code', '', 'button button-primary button-small');
                 scan.dataset.action = 'checkin-open';
                 scan.dataset.eventId = application.event_id;
                 scan.dataset.eventDateId = schedule.event_date_id;
@@ -2263,7 +2283,7 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const content = node('section', undefined, 'volunteer-checkin-modal');
     const header = node('header', undefined, 'volunteer-checkin-header');
     const heading = node('div');
-    heading.append(node('h2', 'Event QR attendance'), node('p', 'Choose check-in or check-out, then scan the QR code for this scheduled event date.'));
+    heading.append(node('h2', 'Event QR attendance'), node('p', 'Scan the QR code for this scheduled event date. Your first scan records time in; your next scan records time out.'));
     const close = button('×', 'checkin-close', 'button button-quiet volunteer-checkin-close');
     close.setAttribute('aria-label', 'Close QR scanner');
     close.dataset.action = 'checkin-close';
@@ -2272,14 +2292,7 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const form = node('form', undefined, 'scan-form volunteer-checkin-form');
     form.dataset.eventId = eventId;
     form.dataset.expectedEventDateId = eventDateId;
-    const attendanceActionLabel = node('label', 'Attendance action');
-    const attendanceAction = node('select');
-    attendanceAction.name = 'action';
-    attendanceAction.add(new Option('Check in', 'check_in'));
-    attendanceAction.add(new Option('Check out', 'check_out'));
-    attendanceAction.setAttribute('aria-label', 'Attendance action');
-    attendanceActionLabel.append(attendanceAction);
-    const cameraButton = button('Check-in via Camera', 'camera', 'button button-primary');
+    const cameraButton = button('Scan QR via Camera', 'camera', 'button button-primary');
     cameraButton.type = 'button';
     cameraButton.dataset.action = 'camera';
     const video = node('video', undefined, 'qr-camera volunteer-checkin-video');
@@ -2300,15 +2313,10 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const cancel = button('Cancel', 'checkin-close', 'button button-quiet');
     cancel.type = 'button';
     cancel.dataset.action = 'checkin-close';
-    const submit = button('Verify & Check in', '', 'button button-primary');
+    const submit = button('Verify & Record Attendance', '', 'button button-primary');
     submit.type = 'submit';
     footer.append(cancel, submit);
-    form.append(attendanceActionLabel, cameraButton, video, status, payloadLabel, footer);
-    attendanceAction.addEventListener('change', () => {
-        const checkingOut = attendanceAction.value === 'check_out';
-        cameraButton.textContent = checkingOut ? 'Check-out via Camera' : 'Check-in via Camera';
-        submit.textContent = checkingOut ? 'Verify & Check out' : 'Verify & Check in';
-    });
+    form.append(cameraButton, video, status, payloadLabel, footer);
     content.append(header, form);
     dialog.append(content);
     dialog.addEventListener('click', event => {
@@ -2325,26 +2333,35 @@ function openVolunteerCheckin(eventId, eventDateId) {
         submit.disabled = true;
         try {
             const parsed = JSON.parse(new FormData(form).get('payload'));
+            const scanRequestId = Array.from(
+                window.crypto.getRandomValues(new Uint8Array(16)),
+                byte => byte.toString(16).padStart(2, '0')
+            ).join('');
             const result = await request('/attendance/scan', {
                 method: 'POST',
                 body: JSON.stringify({
                     ...parsed,
-                    action: attendanceAction.value,
+                    scanRequestId,
                     eventId: Number(form.dataset.eventId),
                     expectedEventDateId: Number(form.dataset.expectedEventDateId)
                 })
             });
             stopQrCamera();
-            const checkedOut = result.action === 'check_out';
-            status.textContent = checkedOut
-                ? 'Check-out successful! Your attendance record now includes a check-out time.'
-                : 'Check-in successful! You are now marked Present for this event.';
+            const recordedAt = dashboardDate(result.recordedAt, {
+                month: 'long',
+                day: 'numeric',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            status.textContent = `${result.message} Recorded at ${recordedAt}.`;
             status.classList.add('is-success');
             window.setTimeout(async () => {
                 if (!dialog.isConnected || currentPage !== 'joined-events') return;
                 if (dialog.open) dialog.close();
                 await renderPage('joined-events');
-                showMessage(pageMessage, checkedOut ? 'Check-out successful.' : 'Check-in successful. Attendance is marked Present.');
+                showMessage(pageMessage, status.textContent);
             }, 900);
         } catch (error) {
             status.textContent = error instanceof SyntaxError ? 'Enter a valid QR payload.' : error.message;
@@ -3307,8 +3324,13 @@ async function printEventAttendanceReport(eventId) {
         const sections = [];
         for (const date of dates) {
             const { attendance } = await request(`/event-dates/${date.id}/attendance`);
-            const rows = attendance.map(item => `<tr><td>${escapeReportText(`${item.first_name} ${item.last_name}`)}</td><td>${escapeReportText(item.affiliation || '—')}</td><td>${escapeReportText(item.attendance_status || 'Not recorded')}</td><td>${escapeReportText(item.scanned_at || '—')}</td><td>${escapeReportText(item.attendance_note || '')}</td></tr>`).join('');
-            sections.push(`<section><h2>${escapeReportText(date.event_date)}</h2><table><thead><tr><th>Volunteer</th><th>Affiliation</th><th>Attendance status</th><th>Recorded at</th><th>Note</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No approved volunteer attendance records.</td></tr>'}</tbody></table></section>`);
+            const rows = attendance.map(item => {
+                const attendanceStatus = item.attendance_status === 'present'
+                    ? item.checked_out_at ? 'Completed' : item.scanned_at ? 'Timed in only' : 'Present'
+                    : item.attendance_status || 'Not recorded';
+                return `<tr><td>${escapeReportText(`${item.first_name} ${item.last_name}`)}</td><td>${escapeReportText(item.affiliation || '—')}</td><td>${escapeReportText(attendanceStatus)}</td><td>${escapeReportText(item.scanned_at || '—')}</td><td>${escapeReportText(item.checked_out_at || '—')}</td><td>${escapeReportText(item.attendance_note || '')}</td></tr>`;
+            }).join('');
+            sections.push(`<section><h2>${escapeReportText(date.event_date)}</h2><table><thead><tr><th>Volunteer</th><th>Affiliation</th><th>Attendance status</th><th>Time In</th><th>Time Out</th><th>Note</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No approved volunteer attendance records.</td></tr>'}</tbody></table></section>`);
         }
         const safeTitle = escapeReportText(event.title);
         const logoUrl = escapeReportText(`${appBasePath}/assets/img/ucc-logo.png`);
@@ -3344,7 +3366,7 @@ async function renderAccounts(status = 'pending') {
         <label>Account type
             <select name="role">
                 <option value="">All Types</option>
-                <option value="partner">Partner / Proposer</option>
+                <option value="partner">Partner / Proponent</option>
                 <option value="volunteer">Volunteer</option>
             </select>
         </label>
@@ -3465,7 +3487,7 @@ async function renderAccounts(status = 'pending') {
                     ['Email Address', account.email],
                     ['Contact Number', account.contact_number || 'Not provided'],
                     ['Registration Date', dashboardDate(account.created_at, { month: 'long', day: 'numeric', year: 'numeric' })],
-                    ['Account Type', account.role === 'partner' ? 'Partner / Proposer' : 'Volunteer'],
+                    ['Account Type', account.role === 'partner' ? 'Partner / Proponent' : 'Volunteer'],
                     ['Category', category],
                     [account.role === 'partner' ? 'Organization Name' : 'Affiliation / School / Company', affiliation],
                     ['Account Status', account.account_status.replaceAll('_', ' ')]
@@ -3998,14 +4020,14 @@ async function renderReports() {
             return;
         }
         const columnSets = {
-            projects: [['Proposal / Project', item => item.title], ['Proposer', item => item.proposer], ['Status', item => dashboardStatusLabel(item.status)], ['Period', item => `${item.period_start || 'Unscheduled'} – ${item.period_end || 'Unscheduled'}`], ['Partners', item => item.partner_count], ['Events', item => item.event_count], ['Budget', item => `₱${Number(item.total_estimated_cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`]],
+            projects: [['Proposal / Project', item => item.title], ['Proponent', item => item.proponent], ['Status', item => dashboardStatusLabel(item.status)], ['Period', item => `${item.period_start || 'Unscheduled'} – ${item.period_end || 'Unscheduled'}`], ['Partners', item => item.partner_count], ['Events', item => item.event_count], ['Budget', item => `₱${Number(item.total_estimated_cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`]],
             partners: [['Organization', item => item.subject], ['Type', item => item.context], ['Account status', item => dashboardStatusLabel(item.status)], ['Registered', item => dashboardDate(item.report_date, { month: 'short', day: 'numeric', year: 'numeric' })], ['Engagement', item => item.details]],
             events: [['Event', item => item.subject], ['Project', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Schedule', item => item.report_date], ['Headcount', item => item.metric_value], ['Summary', item => item.details]],
             volunteer_engagement: [['Volunteer', item => item.subject], ['Event', item => item.context], ['Classification', item => item.category], ['Hours', item => item.metric_value], ['Last attendance', item => item.report_date]],
             evaluations: [['Event', item => item.subject], ['Project', item => item.context], ['Rating', item => item.rating_value ? `${item.rating_value} / 5` : '—'], ['Submitted', item => item.report_date], ['Feedback', item => item.details]],
             documents: [['Project', item => item.subject], ['Document type', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Uploaded', item => item.report_date], ['File', item => item.details]],
             applications: [['Applicant', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Status', item => dashboardStatusLabel(item.status)], ['Applied', item => item.report_date]],
-            attendance: [['Volunteer', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Attendance', item => dashboardStatusLabel(item.status)], ['Check-in', item => item.report_date]],
+            attendance: [['Volunteer', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Attendance', item => dashboardStatusLabel(item.status)], ['Time In', item => item.report_date]],
             participants: [['Event', item => item.subject], ['Project', item => item.context], ['Group', item => item.details], ['Participants', item => item.metric_value], ['Recorded', item => item.report_date]],
             certificates: [['Volunteer', item => item.details], ['Event', item => item.subject], ['Project', item => item.context], ['Issued', item => item.report_date]]
         };
@@ -4022,7 +4044,7 @@ async function renderReports() {
             columns.forEach(([, getValue]) => row.append(node('td', getValue(item) ?? '—')));
             if (module === 'projects') {
                 const actions = node('td');
-                actions.append(button('View dossier', `dossier-${item.id}`, 'button button-quiet button-small'));
+                actions.append(button('View Details', `dossier-${item.id}`, 'button button-quiet button-small'));
                 row.append(actions);
             }
             return row;
@@ -4132,7 +4154,13 @@ pageContent.addEventListener('click', async event => {
     const [action, id, value] = actionButton.dataset.action.split('-');
     actionButton.disabled = true;
     try {
-        if (actionButton.dataset.action === 'back-to-events') {
+        if (actionButton.dataset.action === 'createproposal') {
+            await openAdminProposalForm();
+        } else if (actionButton.dataset.action === 'cancelproposalcreate') {
+            actionButton.closest('.proposal-create-panel')?.remove();
+        } else if (actionButton.dataset.action === 'backtoproposals') {
+            navigateToPage('proposals');
+        } else if (actionButton.dataset.action === 'back-to-events') {
             navigateToPage('events');
         } else if (action === 'checkin' && id === 'open') {
             openVolunteerCheckin(Number(actionButton.dataset.eventId), Number(actionButton.dataset.eventDateId));
@@ -4161,7 +4189,7 @@ pageContent.addEventListener('click', async event => {
         } else if (action === 'review') {
             const proposalId = actionButton.dataset.action.split('-')[1];
             const decision = actionButton.dataset.action.substring(`review-${proposalId}-`.length);
-            const notes = actionButton.closest('tr')?.querySelector('[aria-label^="Review note for"]')?.value || '';
+            const notes = actionButton.closest('tr, [data-proposal-actions]')?.querySelector('[aria-label^="Review note for"]')?.value || '';
             if (decision === 'revision' && !notes.trim()) {
                 showMessage(pageMessage, 'Add revision feedback before requesting changes.', 'error');
                 return;
@@ -4516,7 +4544,9 @@ async function openSubmitConfirmation(proposalId) {
         return;
     }
     const proposalRow = pageContent.querySelector(`tr [data-action="submit-${proposalId}"]`)?.closest('tr');
-    const proposalTitle = proposalRow?.querySelector('.proposal-title-cell strong')?.textContent || 'this proposal';
+    const proposalTitle = proposalRow?.querySelector('.proposal-title-cell strong')?.textContent ||
+        pageContent.querySelector('.project-dossier-heading h2')?.textContent ||
+        'this proposal';
     const slots = proposalDocumentSlots().filter(slot => slot.required);
     const missing = slots.filter(slot => !documentState.readiness[slot.key]);
     const dialog = node('dialog', undefined, 'proposal-submit-modal');
@@ -4667,12 +4697,14 @@ async function showEventAttendanceLog(eventId) {
             const dateSection = panel(dashboardDate(date.event_date, { month: 'long', day: 'numeric', year: 'numeric' }));
             addReportTable(
                 dateSection,
-                ['Volunteer', 'Affiliation', 'Attendance status', 'Checked in', 'Checked out', 'Verification', 'Note'],
+                ['Volunteer', 'Affiliation', 'Attendance status', 'Time In', 'Time Out', 'Verification', 'Note'],
                 attendance,
                 item => [
                     `${item.first_name} ${item.last_name}`,
                     item.affiliation || '—',
-                    item.attendance_status || 'Not recorded',
+                    item.attendance_status === 'present'
+                        ? item.checked_out_at ? 'Completed' : item.scanned_at ? 'Timed in only' : 'Present'
+                        : item.attendance_status || 'Not recorded',
                     item.scanned_at ? dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—',
                     item.checked_out_at ? dashboardDate(item.checked_out_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—',
                     item.verification_status || 'pending',
@@ -4700,7 +4732,7 @@ async function showDateAttendance(eventDateId) {
         const info = node('div', undefined, 'record-main');
         info.append(
             node('strong', `${item.first_name} ${item.last_name}`),
-            node('small', `${item.email} · ${item.affiliation || 'Volunteer'} · ${item.attendance_status || 'Not recorded'} · Verification: ${item.verification_status || 'pending'}${item.scanned_at ? ` · In ${dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}${item.checked_out_at ? ` · Out ${dashboardDate(item.checked_out_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}`)
+            node('small', `${item.email} · ${item.affiliation || 'Volunteer'} · ${item.attendance_status === 'present' ? item.checked_out_at ? 'Completed' : item.scanned_at ? 'Timed in only' : 'Present' : item.attendance_status || 'Not recorded'} · Verification: ${item.verification_status || 'pending'}${item.scanned_at ? ` · Time In ${dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}${item.checked_out_at ? ` · Time Out ${dashboardDate(item.checked_out_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}`)
         );
         const controls = node('div', undefined, 'attendance-edit-controls');
         const status = node('select');
@@ -5162,15 +5194,17 @@ async function exportReport(format) {
 }
 
 async function showProjectDossier(projectId) {
+    return navigateToProposal(projectId);
+}
+
+async function renderProposalDetails(projectId) {
     const data = await request(`/reports/projects/${projectId}`);
-    document.querySelector('#project-dossier-modal')?.remove();
     const project = data.project;
     const dateRange = project.periodStart
         ? `${project.periodStart}${project.periodEnd ? ` to ${project.periodEnd}` : ''}`
         : 'Unscheduled';
-    const dialog = node('dialog', undefined, 'project-dossier-modal');
-    dialog.id = 'project-dossier-modal';
-    dialog.setAttribute('aria-labelledby', 'project-dossier-title');
+    setHeading(project.title, 'Complete proposal details, supporting documents, and review actions.');
+    const dossier = node('section', undefined, 'project-dossier-page');
     const content = node('div', undefined, 'project-dossier-content');
     const header = node('header', undefined, 'project-dossier-header');
     const heading = node('div', undefined, 'project-dossier-heading');
@@ -5181,10 +5215,55 @@ async function showProjectDossier(projectId) {
     const headingMeta = node('div', undefined, 'project-dossier-meta');
     headingMeta.append(status, node('span', dateRange));
     heading.append(eyebrow, title, headingMeta);
-    const closeButton = button('×', 'close-project-dossier', 'button button-quiet project-dossier-close');
-    closeButton.type = 'button';
-    closeButton.setAttribute('aria-label', 'Close proposal details');
-    header.append(heading, closeButton);
+    header.append(heading);
+
+    const actions = node('section', undefined, 'proposal-detail-actions');
+    actions.dataset.proposalActions = '';
+    actions.append(button('← Back to Proposals', 'backtoproposals', 'button button-quiet'));
+    const isOwner = Number(data.owner?.id) === Number(currentUser.id);
+    if (currentUser.role === 'partner' && isOwner && ['draft', 'revision'].includes(project.status)) {
+        actions.append(
+            button(project.status === 'revision' ? 'Edit Proposal' : 'Edit Draft', `editproposal-${projectId}`, 'button button-quiet'),
+            button('Add document', `upload-${projectId}`, 'button button-quiet'),
+            button(project.status === 'revision' ? 'Resubmit for Review' : 'Submit', `submit-${projectId}`, 'button button-primary')
+        );
+    }
+    if (currentUser.role === 'admin' && project.status === 'draft') {
+        actions.append(
+            button('Add document', `upload-${projectId}`, 'button button-quiet'),
+            button('Submit', `submit-${projectId}`, 'button button-primary')
+        );
+    }
+    if (currentUser.role === 'admin' && ['submitted', 'under_review'].includes(project.status)) {
+        const reviewNote = node('textarea');
+        reviewNote.rows = 2;
+        reviewNote.maxLength = 2000;
+        reviewNote.placeholder = project.status === 'under_review'
+            ? 'Revision feedback (required when requesting changes)'
+            : 'Review note (required when requesting changes)';
+        reviewNote.setAttribute('aria-label', `Review note for ${project.title}`);
+        actions.append(reviewNote);
+        if (project.status === 'submitted') actions.append(button('Start review', `review-${projectId}-under_review`));
+        actions.append(
+            button('Request revision', `review-${projectId}-revision`),
+            button('Approve', `review-${projectId}-approved`),
+            button('Reject', `review-${projectId}-rejected`, 'button button-danger button-small')
+        );
+    }
+    if (currentUser.role === 'admin' && project.status === 'approved') {
+        actions.append(
+            button('Invite Partner', `invitepartner-${projectId}`, 'button button-quiet'),
+            button('Activate', `review-${projectId}-active`, 'button button-primary')
+        );
+    } else if (project.status === 'approved' && currentUser.role === 'partner' && isOwner) {
+        actions.append(button('Invite Partner', `invitepartner-${projectId}`, 'button button-quiet'));
+    }
+    if (currentUser.role === 'partner' && data.userRelationship === 'collaborator' && data.userInvitationStatus === 'pending') {
+        actions.append(
+            button('Accept invitation', `collaborate-${projectId}-accepted`, 'button button-primary'),
+            button('Decline', `collaborate-${projectId}-declined`, 'button button-danger button-small')
+        );
+    }
 
     const body = node('div', undefined, 'project-dossier-body');
     const summary = node('section', undefined, 'project-dossier-section project-dossier-summary');
@@ -5194,6 +5273,7 @@ async function showProjectDossier(projectId) {
     const brief = node('section', undefined, 'project-dossier-section');
     brief.append(node('h3', 'Project Brief'));
     const briefGroups = [
+        ['Proponent', data.owner?.organization_name || `${data.owner?.first_name || ''} ${data.owner?.last_name || ''}`.trim() || 'Not available'],
         ['Co-Proponents / Partner Entities', (project.proponents || []).join(', ') || 'No co-proponents provided.'],
         ['Program Duration', project.duration || dateRange],
         ['Project Venue / Location', project.venue || 'Not specified'],
@@ -5202,7 +5282,10 @@ async function showProjectDossier(projectId) {
         ['Target Beneficiaries & Headcount', project.targetBeneficiaries || 'Not provided'],
         ['Target Outputs / Success Indicators', project.targetOutputs || 'Not provided'],
         ['Possible Risks & Mitigation Plan', project.possibleRisks || 'Not provided'],
-        ['Expected Private / External Partnerships', project.expectedPrivatePartnerships || 'Not provided']
+        ['Expected Private / External Partnerships', project.expectedPrivatePartnerships || 'Not provided'],
+        ['Volunteer Engagement', project.acceptsVolunteers ? `Yes · ${project.volunteerApprovalMode === 'auto' ? 'Auto Accept' : 'Manual Review'}` : 'No'],
+        ['Project Classifications', (data.classifications || []).join(', ') || 'Not specified'],
+        ['CES Categories', (data.categories || []).join(', ') || 'Not specified']
     ];
     const fields = node('div', undefined, 'project-dossier-fields');
     briefGroups.forEach(([label, value]) => {
@@ -5295,21 +5378,10 @@ async function showProjectDossier(projectId) {
     download.href = `${API}/proposals/${projectId}/brief.pdf`;
     download.target = '_blank';
     download.rel = 'noopener';
-    const footerClose = button('Close', 'close-project-dossier', 'button button-quiet');
-    footerClose.type = 'button';
-    footer.append(download, footerClose);
-
+    footer.append(download);
     content.append(header, body, footer);
-    dialog.append(content);
-    dialog.addEventListener('click', event => {
-        if (event.target === dialog) dialog.close();
-    });
-    dialog.addEventListener('click', event => {
-        if (event.target.closest('[data-action="close-project-dossier"]')) dialog.close();
-    });
-    dialog.addEventListener('close', () => dialog.remove(), { once: true });
-    document.body.append(dialog);
-    dialog.showModal();
+    dossier.append(actions, content);
+    pageContent.append(dossier);
 }
 
 async function startQrCamera(trigger) {

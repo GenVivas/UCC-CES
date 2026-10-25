@@ -1,5 +1,5 @@
 Options -Indexes
 RewriteEngine On
 RewriteRule ^$ ces_landingpage/ [L]
-RewriteRule ^(?:login|portal)/?$ public/index.html [L]
+RewriteRule ^(?:login|portal)/?$ public/index.php [L]
 RewriteRule ^(?!public/|ces_landingpage/|\.well-known/)(.*)$ public/$1 [L]

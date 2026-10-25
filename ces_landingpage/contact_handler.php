@@ -1,4 +1,6 @@
 <?php
+declare(strict_types=1);
+
 /**
  * CES Landing Page — contact_handler.php
  * Handles contact form submission.
@@ -10,41 +12,72 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// Sanitize & validate inputs
-$first_name = trim(htmlspecialchars($_POST['first_name'] ?? ''));
-$last_name  = trim(htmlspecialchars($_POST['last_name']  ?? ''));
-$email      = trim(filter_input(INPUT_POST, 'email', FILTER_SANITIZE_EMAIL));
-$subject    = trim(htmlspecialchars($_POST['subject']    ?? ''));
-$message    = trim(htmlspecialchars($_POST['message']    ?? ''));
+$readInput = static fn (string $key): string => is_string($_POST[$key] ?? null)
+    ? trim($_POST[$key])
+    : '';
+
+$firstName = $readInput('first_name');
+$lastName = $readInput('last_name');
+$email = $readInput('email');
+$subject = $readInput('subject');
+$message = $readInput('message');
 
 $errors = [];
 
-if (empty($first_name)) $errors[] = "First name is required.";
-if (empty($last_name))  $errors[] = "Last name is required.";
-if (!filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = "A valid email address is required.";
-if (empty($message))    $errors[] = "Message cannot be empty.";
+if ($firstName === '' || mb_strlen($firstName, 'UTF-8') > 100) {
+    $errors[] = 'Enter a first name of no more than 100 characters.';
+}
+if ($lastName === '' || mb_strlen($lastName, 'UTF-8') > 100) {
+    $errors[] = 'Enter a last name of no more than 100 characters.';
+}
+if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 254) {
+    $errors[] = 'Enter a valid email address.';
+}
+if ($subject !== '' && !in_array($subject, [
+    'Volunteer Inquiry',
+    'Partnership Proposal',
+    'Program Information',
+    'General Inquiry',
+], true)) {
+    $errors[] = 'Select a valid subject.';
+}
+if ($message === '' || mb_strlen($message, 'UTF-8') > 5000) {
+    $errors[] = 'Enter a message of no more than 5,000 characters.';
+}
 
-if (!empty($errors)) {
-    // Redirect back with error flag
-    $error_msg = urlencode(implode(' ', $errors));
-    header("Location: index.php?status=error&msg={$error_msg}#contact");
+if ($errors !== []) {
+    $errorMessage = rawurlencode(implode(' ', $errors));
+    header("Location: index.php?status=error&msg={$errorMessage}#contact");
     exit;
 }
 
-// --- Send email (configure recipient below) ---
-$to      = 'ces@ucc.edu.ph'; // TODO: replace with actual CES email
-$subject_line = "[CES Website] {$subject} — from {$first_name} {$last_name}";
-$body    = "Name:    {$first_name} {$last_name}\n"
-         . "Email:   {$email}\n"
-         . "Subject: {$subject}\n\n"
-         . "Message:\n{$message}";
-$headers = "From: {$first_name} {$last_name} <{$email}>\r\n"
-         . "Reply-To: {$email}\r\n"
-         . "X-Mailer: PHP/" . phpversion();
+$config = require dirname(__DIR__) . DIRECTORY_SEPARATOR . 'config' . DIRECTORY_SEPARATOR . 'app.php';
+require_once dirname(__DIR__) . DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR . 'autoload.php';
 
-// Uncomment to actually send mail on a configured server:
-// mail($to, $subject_line, $body, $headers);
+$subject = $subject !== '' ? $subject : 'General Inquiry';
+$subjectLine = sprintf('[CES Website] %s — from %s %s', $subject, $firstName, $lastName);
+$body = sprintf(
+    "Name: %s %s\nEmail: %s\nSubject: %s\n\nMessage:\n%s",
+    $firstName,
+    $lastName,
+    $email,
+    $subject,
+    $message
+);
 
-// Redirect back with success flag
-header("Location: index.php?status=success#contact");
+try {
+    \Ces\NotificationService::sendRequired(
+        $config['mail'],
+        $config['contact_email'],
+        'UCC CES',
+        $subjectLine,
+        $body
+    );
+} catch (RuntimeException $exception) {
+    error_log('CES contact form delivery failed: ' . $exception->getMessage());
+    header('Location: index.php?status=error&msg=' . rawurlencode('Your message could not be sent right now. Please try again later.') . '#contact');
+    exit;
+}
+
+header('Location: index.php?status=success#contact');
 exit;

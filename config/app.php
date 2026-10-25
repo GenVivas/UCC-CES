@@ -30,6 +30,7 @@ $config = [
         'from' => getenv('CES_SMTP_FROM') ?: '',
         'from_name' => getenv('CES_SMTP_FROM_NAME') ?: 'UCC-CES',
     ],
+    'contact_email' => getenv('CES_CONTACT_EMAIL') ?: 'ces@ucc.edu.ph',
 ];
 
 $localConfigPath = __DIR__ . DIRECTORY_SEPARATOR . 'local.php';

@@ -45,6 +45,11 @@ final class ApiController
         } catch (RuntimeException $exception) {
             $status = $exception->getCode();
             $status = is_int($status) && $status >= 400 && $status <= 599 ? $status : 400;
+            if ($path === '/attendance/scan' && $method === 'POST' && $status === 419) {
+                $this->logActivity('attendance.scan_rejected', 'event_date', null, [
+                    'reason' => 'invalid_session_token',
+                ]);
+            }
             Http::json(['error' => $exception->getMessage()], $status);
         } catch (Throwable $exception) {
             error_log(sprintf('Unhandled API error: %s in %s:%d', $exception->getMessage(), $exception->getFile(), $exception->getLine()));
@@ -1773,19 +1778,33 @@ final class ApiController
         $user = Http::requireRole('admin', 'partner');
         if ($user['role'] === 'admin') {
             $statement = $this->db->query(
-                'SELECT p.*, u.first_name, u.last_name,
+                'SELECT p.*, u.first_name, u.last_name, owner_partner.organization_name,
+                        (SELECT CONCAT(MIN(a.start_time), \'–\', MAX(a.end_time))
+                         FROM events e
+                         JOIN event_dates ed ON ed.event_id = e.id
+                         JOIN activities a ON a.event_date_id = ed.id
+                         WHERE e.proposal_id = p.id) AS scheduled_time,
                         (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         NULL AS user_relationship, NULL AS user_invitation_status
-                 FROM proposals p JOIN users u ON u.id = p.owner_user_id ORDER BY p.updated_at DESC'
+                 FROM proposals p
+                 JOIN users u ON u.id = p.owner_user_id
+                 LEFT JOIN partners owner_partner ON owner_partner.user_id = u.id
+                 ORDER BY p.updated_at DESC'
             );
         } else {
             $statement = $this->db->prepare(
-                'SELECT DISTINCT p.*, u.first_name, u.last_name,
+                'SELECT DISTINCT p.*, u.first_name, u.last_name, owner_partner.organization_name,
+                       (SELECT CONCAT(MIN(a.start_time), \'–\', MAX(a.end_time))
+                        FROM events e
+                        JOIN event_dates ed ON ed.event_id = e.id
+                        JOIN activities a ON a.event_date_id = ed.id
+                        WHERE e.proposal_id = p.id) AS scheduled_time,
                        (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         (SELECT pp.relationship FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_relationship,
                         (SELECT pp.invitation_status FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_invitation_status
                  FROM proposals p
                  JOIN users u ON u.id = p.owner_user_id
+                 LEFT JOIN partners owner_partner ON owner_partner.user_id = u.id
                  LEFT JOIN proposal_partners pp ON pp.proposal_id = p.id
                  WHERE p.owner_user_id = ? OR pp.partner_user_id = ? ORDER BY p.updated_at DESC'
             );
@@ -1796,9 +1815,24 @@ final class ApiController
 
     private function createProposal(): never
     {
-        $user = Http::requireRole('partner');
+        $user = Http::requireRole('admin', 'partner');
         $data = Http::body();
         $brief = $this->validatedProjectBrief($data);
+        if ($user['role'] === 'admin') {
+            $ownerId = Http::positiveId((string) ($data['ownerUserId'] ?? ''));
+            $owner = $this->db->prepare(
+                "SELECT u.id
+                 FROM users u
+                 JOIN partners p ON p.user_id = u.id
+                 WHERE u.id = ? AND u.role = 'partner' AND u.account_status = 'approved'"
+            );
+            $owner->execute([$ownerId]);
+            if (!$owner->fetchColumn()) {
+                throw new RuntimeException('Choose an approved partner as the proposal owner.');
+            }
+        } else {
+            $ownerId = (int) $user['id'];
+        }
         $this->db->beginTransaction();
         try {
             $statement = $this->db->prepare(
@@ -1810,7 +1844,7 @@ final class ApiController
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             $statement->execute([
-                $user['id'], $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
+                $ownerId, $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
                 $brief['activity_components'], $brief['estimated_cost_items'], $brief['total_estimated_cost'],
                 $brief['justification'], $brief['target_beneficiaries'], $brief['target_outputs'],
                 $brief['possible_risks'], $brief['expected_private_partnerships'],
@@ -1819,7 +1853,7 @@ final class ApiController
             ]);
             $proposalId = (int) $this->db->lastInsertId();
             $partner = $this->db->prepare("INSERT INTO proposal_partners (proposal_id, partner_user_id, relationship, invitation_status) VALUES (?, ?, 'primary', 'accepted')");
-            $partner->execute([$proposalId, $user['id']]);
+            $partner->execute([$proposalId, $ownerId]);
             $this->syncProposalClassifications($proposalId, $data['classifications'] ?? []);
             $this->syncProposalCategories($proposalId, $data['categoryIds'] ?? []);
             $this->db->commit();
@@ -1827,7 +1861,12 @@ final class ApiController
             $this->db->rollBack();
             throw $exception;
         }
-        $this->logActivity('proposal.created', 'proposal', $proposalId);
+        $this->logActivity(
+            'proposal.created',
+            'proposal',
+            $proposalId,
+            $user['role'] === 'admin' ? ['created_for_partner' => $ownerId] : []
+        );
         Http::json(['id' => $proposalId, 'status' => 'draft'], 201);
     }
 
@@ -2025,15 +2064,19 @@ final class ApiController
 
     private function uploadProposalDocument(int $proposalId): never
     {
-        $user = Http::requireRole('partner');
-        $this->assertProposalAccess($proposalId, $user, true);
+        $user = Http::requireRole('admin', 'partner');
+        if ($user['role'] === 'partner') {
+            $this->assertProposalAccess($proposalId, $user, true);
+        }
         $this->db->beginTransaction();
         $path = null;
         try {
-            $proposal = $this->db->prepare(
-                'SELECT status FROM proposals WHERE id = ? AND owner_user_id = ? FOR UPDATE'
-            );
-            $proposal->execute([$proposalId, (int) $user['id']]);
+            $proposal = $user['role'] === 'admin'
+                ? $this->db->prepare('SELECT status FROM proposals WHERE id = ? FOR UPDATE')
+                : $this->db->prepare('SELECT status FROM proposals WHERE id = ? AND owner_user_id = ? FOR UPDATE');
+            $proposal->execute($user['role'] === 'admin'
+                ? [$proposalId]
+                : [$proposalId, (int) $user['id']]);
             $status = $proposal->fetchColumn();
             if ($status === false) {
                 throw new RuntimeException('Proposal was not found or you do not have access.', 404);
@@ -2118,8 +2161,10 @@ final class ApiController
 
     private function proposalDocuments(int $proposalId): never
     {
-        $user = Http::requireRole('partner');
-        $this->assertProposalAccess($proposalId, $user, true);
+        $user = Http::requireRole('admin', 'partner');
+        if ($user['role'] === 'partner') {
+            $this->assertProposalAccess($proposalId, $user, true);
+        }
         $documents = $this->db->prepare(
             'SELECT id, document_type, original_name, is_signed, created_at
              FROM documents
@@ -2184,8 +2229,10 @@ final class ApiController
 
     private function submitProposal(int $proposalId): never
     {
-        $user = Http::requireRole('partner');
-        $this->assertProposalAccess($proposalId, $user, true);
+        $user = Http::requireRole('admin', 'partner');
+        if ($user['role'] === 'partner') {
+            $this->assertProposalAccess($proposalId, $user, true);
+        }
         $readiness = $this->proposalDocumentReadiness($proposalId);
         if (!$readiness['signed_proposal_letter'] || !$readiness['project_brief']) {
             throw new RuntimeException('Submission requires a signed proposal letter and project brief.');
@@ -2218,7 +2265,7 @@ final class ApiController
         }
         $notes = trim($notesValue);
         if ($status === 'revision' && $notes === '') {
-            throw new RuntimeException('Add revision feedback so the proposer knows what needs to be updated.');
+            throw new RuntimeException('Add revision feedback so the proponent knows what needs to be updated.');
         }
         if (mb_strlen($notes, 'UTF-8') > 2000) {
             throw new RuntimeException('Review notes cannot exceed 2,000 characters.');
@@ -3521,7 +3568,7 @@ final class ApiController
         fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, [
             'Record type', 'Event', 'Event date', 'Attendee name', 'Email', 'Affiliation',
-            'Application status', 'Attendance status', 'Checked in at', 'Checked out at', 'Verification status', 'Note',
+            'Application status', 'Attendance status', 'Time In', 'Time Out', 'Verification status', 'Note',
             'Participant group', 'Participant count',
         ]);
         foreach ($rows as $row) {
@@ -3966,115 +4013,361 @@ final class ApiController
         ]);
     }
 
+    private function rejectAttendanceScan(
+        string $reason,
+        string $message,
+        int $status,
+        ?int $eventDateId = null,
+        ?int $eventId = null
+    ): never {
+        $this->logActivity('attendance.scan_rejected', 'event_date', $eventDateId, [
+            'reason' => $reason,
+            'event_id' => $eventId,
+        ]);
+        throw new RuntimeException($message, $status);
+    }
+
     private function scanAttendance(): never
     {
-        $user = Http::requireRole('volunteer');
-        $this->requireApprovedVolunteer((int) $user['id']);
-        $data = Http::body();
-        $action = (string) ($data['action'] ?? 'check_in');
-        if (!in_array($action, ['check_in', 'check_out'], true)) {
-            throw new RuntimeException('Attendance action must be check_in or check_out.');
+        $user = $_SESSION['user'] ?? null;
+        if (!is_array($user)) {
+            $this->rejectAttendanceScan('not_authenticated', 'Sign in to record attendance.', 401);
         }
-        $eventDateId = Http::positiveId((string) ($data['eventDateId'] ?? ''));
-        $expectedEventId = isset($data['eventId'])
-            ? Http::positiveId((string) $data['eventId'])
-            : null;
-        $expectedEventDateId = isset($data['expectedEventDateId'])
-            ? Http::positiveId((string) $data['expectedEventDateId'])
-            : null;
-        $token = (string) ($data['token'] ?? '');
+        if (($user['role'] ?? '') !== 'volunteer') {
+            $this->rejectAttendanceScan('unauthorized_role', 'You are not allowed to record attendance.', 403);
+        }
+
+        try {
+            $data = Http::body();
+        } catch (RuntimeException) {
+            $this->rejectAttendanceScan('invalid_qr_payload', 'Invalid attendance QR code.', 400);
+        }
+        $rawEventDateId = $data['eventDateId'] ?? null;
+        $eventDateId = is_int($rawEventDateId) || is_string($rawEventDateId)
+            ? filter_var($rawEventDateId, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+            : false;
+        $token = $data['token'] ?? null;
+        $scanRequestId = $data['scanRequestId'] ?? null;
+        if ($eventDateId === false || !is_string($token) || !preg_match('/^[a-f0-9]{64}$/', $token) ||
+            !is_string($scanRequestId) || !preg_match('/^[a-f0-9]{32}$/', $scanRequestId)) {
+            $this->rejectAttendanceScan('invalid_qr_payload', 'Invalid attendance QR code.', 400);
+        }
+        $eventDateId = (int) $eventDateId;
+        $contextEventId = $data['eventId'] ?? null;
+        $contextEventDateId = $data['expectedEventDateId'] ?? null;
+
         $statement = $this->db->prepare(
-            'SELECT ed.event_date, ed.qr_token_hash, ed.event_id
-             FROM event_dates ed JOIN events e ON e.id = ed.event_id
+            'SELECT ed.id, ed.event_date, ed.qr_token_hash, ed.event_id, p.status AS proposal_status
+             FROM event_dates ed
+             JOIN events e ON e.id = ed.event_id
              JOIN proposals p ON p.id = e.proposal_id
-             WHERE ed.id = ? AND p.status IN (?, ?)'
+             WHERE ed.id = ?'
         );
-        $statement->execute([$eventDateId, 'approved', 'active']);
+        $statement->execute([$eventDateId]);
         $date = $statement->fetch();
-        if (!$date || $date['event_date'] !== date('Y-m-d')) {
-            throw new RuntimeException('This QR code is not valid for today.');
-        }
-        if ($expectedEventId !== null && (int) $date['event_id'] !== $expectedEventId) {
-            throw new RuntimeException('This QR code belongs to a different joined event.');
-        }
-        if ($expectedEventDateId !== null && $eventDateId !== $expectedEventDateId) {
-            throw new RuntimeException('This QR code belongs to a different event date.');
-        }
         $secret = (string) ($this->config['app_key'] ?? '');
+        if (!$date) {
+            $this->rejectAttendanceScan('invalid_qr', 'Invalid attendance QR code.', 400, $eventDateId);
+        }
         if (strlen($secret) < 32) {
-            throw new RuntimeException('Attendance QR scanning is not configured.', 503);
+            error_log('Attendance QR scanning is unavailable because CES_APP_KEY is not configured.');
+            $this->rejectAttendanceScan(
+                'qr_signing_unavailable',
+                'Attendance scanning is temporarily unavailable. Please contact CES.',
+                503,
+                $eventDateId,
+                (int) $date['event_id']
+            );
         }
-        $expectedToken = hash_hmac('sha256', $date['event_id'] . ':' . $eventDateId . ':' . $date['event_date'], $secret);
-        if (!hash_equals($expectedToken, $token) || !hash_equals($date['qr_token_hash'], hash('sha256', $token))) {
-            throw new RuntimeException('The QR code is invalid.');
-        }
-        $application = $this->db->prepare(
-            "SELECT id FROM event_applications WHERE event_id = ? AND volunteer_user_id = ? AND status = 'approved'"
+
+        $expectedToken = hash_hmac(
+            'sha256',
+            $date['event_id'] . ':' . $date['id'] . ':' . $date['event_date'],
+            $secret
         );
-        $application->execute([(int) $date['event_id'], (int) $user['id']]);
-        $applicationId = $application->fetchColumn();
-        if (!$applicationId) {
-            throw new RuntimeException('An approved application is required to record attendance.', 403);
+        if (!hash_equals($expectedToken, $token) ||
+            !hash_equals((string) $date['qr_token_hash'], hash('sha256', $token))) {
+            $this->rejectAttendanceScan(
+                'invalid_qr_signature',
+                'Invalid attendance QR code.',
+                400,
+                $eventDateId,
+                (int) $date['event_id']
+            );
         }
+        if (array_key_exists('eventId', $data)) {
+            $contextEventId = is_int($contextEventId) || is_string($contextEventId)
+                ? filter_var($contextEventId, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+                : false;
+            if ($contextEventId === false) {
+                $this->rejectAttendanceScan('invalid_event_context', 'Invalid attendance QR code.', 400, $eventDateId, (int) $date['event_id']);
+            }
+            if ((int) $contextEventId !== (int) $date['event_id']) {
+                $this->rejectAttendanceScan(
+                    'qr_event_context_mismatch',
+                    'This QR code is for another event.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+        }
+        if (array_key_exists('expectedEventDateId', $data)) {
+            $contextEventDateId = is_int($contextEventDateId) || is_string($contextEventDateId)
+                ? filter_var($contextEventDateId, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]])
+                : false;
+            if ($contextEventDateId === false) {
+                $this->rejectAttendanceScan('invalid_date_context', 'Invalid attendance QR code.', 400, $eventDateId, (int) $date['event_id']);
+            }
+            if ((int) $contextEventDateId !== $eventDateId) {
+                $this->rejectAttendanceScan(
+                    'qr_date_context_mismatch',
+                    'This QR code is for another event date.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+        }
+        if (!in_array($date['proposal_status'], ['approved', 'active'], true)) {
+            $this->rejectAttendanceScan(
+                'event_not_active',
+                'Attendance is not available yet.',
+                409,
+                $eventDateId,
+                (int) $date['event_id']
+            );
+        }
+        if ($date['event_date'] < date('Y-m-d')) {
+            $this->rejectAttendanceScan(
+                'event_date_passed',
+                'This event date has already passed.',
+                409,
+                $eventDateId,
+                (int) $date['event_id']
+            );
+        }
+        if ($date['event_date'] > date('Y-m-d')) {
+            $this->rejectAttendanceScan(
+                'event_date_future',
+                'Attendance is not available yet.',
+                409,
+                $eventDateId,
+                (int) $date['event_id']
+            );
+        }
+
         $this->db->beginTransaction();
         try {
+            $priorRequest = $this->db->prepare(
+                'SELECT attendance_id FROM attendance_scan_requests WHERE scan_request_id = ? FOR UPDATE'
+            );
+            $priorRequest->execute([$scanRequestId]);
+            if ($priorRequest->fetchColumn()) {
+                $this->db->rollBack();
+                $this->rejectAttendanceScan(
+                    'duplicate_scan_request',
+                    'This scan request was already processed. Check your attendance status.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+
+            $account = $this->db->prepare(
+                "SELECT account_status FROM users WHERE id = ? AND role = 'volunteer' FOR UPDATE"
+            );
+            $account->execute([(int) $user['id']]);
+            if ($account->fetchColumn() !== 'approved') {
+                $this->db->rollBack();
+                $this->rejectAttendanceScan(
+                    'volunteer_not_approved',
+                    'Your volunteer account is not approved.',
+                    403,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+
+            $application = $this->db->prepare(
+                "SELECT id FROM event_applications
+                 WHERE event_id = ? AND volunteer_user_id = ? AND status = 'approved'
+                 FOR UPDATE"
+            );
+            $application->execute([(int) $date['event_id'], (int) $user['id']]);
+            $applicationId = $application->fetchColumn();
+            if (!$applicationId) {
+                $this->db->rollBack();
+                $this->rejectAttendanceScan(
+                    'event_application_not_approved',
+                    'You are not an approved volunteer for this event.',
+                    403,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+            if (date('Y-m-d') !== $date['event_date']) {
+                $this->db->rollBack();
+                $this->rejectAttendanceScan(
+                    'event_date_not_current',
+                    $date['event_date'] < date('Y-m-d')
+                        ? 'This event date has already passed.'
+                        : 'Attendance is not available yet.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+
             $attendanceStatement = $this->db->prepare(
                 'SELECT id, status, scanned_at, checked_out_at, verification_status
                  FROM attendance WHERE application_id = ? AND event_date_id = ? FOR UPDATE'
             );
             $attendanceStatement->execute([(int) $applicationId, $eventDateId]);
             $attendance = $attendanceStatement->fetch();
+            $attendanceId = $attendance ? (int) $attendance['id'] : null;
 
-            if ($action === 'check_in') {
-                if ($attendance && $attendance['checked_out_at'] !== null) {
-                    throw new RuntimeException('You have already checked out for this event date.');
-                }
-                if (!$attendance || $attendance['status'] !== 'present' || $attendance['scanned_at'] === null) {
-                    $insert = $this->db->prepare(
-                        "INSERT INTO attendance
-                            (application_id, event_date_id, status, scanned_at, checked_out_at, verification_status)
-                         VALUES (?, ?, 'present', NOW(), NULL, 'verified')
-                         ON DUPLICATE KEY UPDATE status = 'present', scanned_at = NOW(), checked_out_at = NULL,
-                            verification_status = 'verified', marked_by = NULL, note = NULL"
-                    );
-                    $insert->execute([(int) $applicationId, $eventDateId]);
-                    $message = 'Check-in recorded.';
-                    $logAction = 'attendance.checked_in';
-                } else {
-                    $message = 'Check-in was already recorded.';
-                }
-            } else {
-                if (!$attendance || $attendance['status'] !== 'present' || $attendance['scanned_at'] === null) {
-                    throw new RuntimeException('Check in first before checking out.');
-                }
+            if ($attendance && $attendance['scanned_at'] !== null && $attendance['checked_out_at'] !== null) {
+                $this->db->rollBack();
+                $this->rejectAttendanceScan(
+                    'attendance_already_completed',
+                    'Your attendance is already completed.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
+
+            if ($attendance && $attendance['scanned_at'] !== null) {
                 if ($attendance['verification_status'] !== 'verified') {
-                    throw new RuntimeException('Your check-in must be verified before checking out.');
+                    $this->db->rollBack();
+                    $this->rejectAttendanceScan(
+                        'time_in_not_verified',
+                        'Your Time In needs to be verified before you can record Time Out.',
+                        409,
+                        $eventDateId,
+                        (int) $date['event_id']
+                    );
                 }
-                if ($attendance['checked_out_at'] !== null) {
-                    throw new RuntimeException('You have already checked out for this event date.');
+                $elapsed = $this->db->prepare(
+                    'SELECT TIMESTAMPDIFF(SECOND, scanned_at, CURRENT_TIMESTAMP)
+                     FROM attendance WHERE id = ?'
+                );
+                $elapsed->execute([(int) $attendance['id']]);
+                $secondsSinceTimeIn = (int) $elapsed->fetchColumn();
+                if ($secondsSinceTimeIn < 0) {
+                    $this->db->rollBack();
+                    $this->rejectAttendanceScan(
+                        'time_out_before_time_in',
+                        'Time Out cannot be earlier than Time In.',
+                        409,
+                        $eventDateId,
+                        (int) $date['event_id']
+                    );
+                }
+                if ($secondsSinceTimeIn < 60) {
+                    $this->db->rollBack();
+                    $this->rejectAttendanceScan(
+                        'duplicate_scan_too_soon',
+                        'Your Time In has already been recorded. Please wait at least one minute before scanning again for Time Out.',
+                        409,
+                        $eventDateId,
+                        (int) $date['event_id']
+                    );
                 }
                 $checkOut = $this->db->prepare(
-                    "UPDATE attendance SET checked_out_at = GREATEST(NOW(), scanned_at), verification_status = 'verified' WHERE id = ?"
+                    "UPDATE attendance
+                     SET checked_out_at = CURRENT_TIMESTAMP, verification_status = 'verified'
+                     WHERE id = ? AND scanned_at IS NOT NULL AND checked_out_at IS NULL
+                       AND CURRENT_TIMESTAMP >= scanned_at"
                 );
                 $checkOut->execute([(int) $attendance['id']]);
-                $message = 'Check-out recorded.';
+                if ($checkOut->rowCount() !== 1) {
+                    $this->db->rollBack();
+                    $this->rejectAttendanceScan(
+                        'duplicate_or_invalid_time_out',
+                        'Your attendance is already completed.',
+                        409,
+                        $eventDateId,
+                        (int) $date['event_id']
+                    );
+                }
+                $action = 'check_out';
                 $logAction = 'attendance.checked_out';
+            } elseif ($attendance) {
+                $checkIn = $this->db->prepare(
+                    "UPDATE attendance
+                     SET status = 'present', scanned_at = CURRENT_TIMESTAMP, checked_out_at = NULL,
+                         verification_status = 'verified', marked_by = NULL, note = NULL
+                     WHERE id = ? AND scanned_at IS NULL AND checked_out_at IS NULL"
+                );
+                $checkIn->execute([(int) $attendance['id']]);
+                if ($checkIn->rowCount() !== 1) {
+                    $this->db->rollBack();
+                    $this->rejectAttendanceScan(
+                        'duplicate_time_in',
+                        'Your Time In has already been recorded.',
+                        409,
+                        $eventDateId,
+                        (int) $date['event_id']
+                    );
+                }
+                $action = 'check_in';
+                $logAction = 'attendance.checked_in';
+            } else {
+                $insert = $this->db->prepare(
+                    "INSERT INTO attendance
+                        (application_id, event_date_id, status, scanned_at, verification_status)
+                     VALUES (?, ?, 'present', CURRENT_TIMESTAMP, 'verified')"
+                );
+                $insert->execute([(int) $applicationId, $eventDateId]);
+                $attendanceId = (int) $this->db->lastInsertId();
+                $action = 'check_in';
+                $logAction = 'attendance.checked_in';
             }
+
+            $scanRequest = $this->db->prepare(
+                'INSERT INTO attendance_scan_requests (scan_request_id, attendance_id, action)
+                 VALUES (?, ?, ?)'
+            );
+            $scanRequest->execute([$scanRequestId, $attendanceId, $action]);
+            $record = $this->db->prepare(
+                'SELECT scanned_at, checked_out_at FROM attendance
+                 WHERE application_id = ? AND event_date_id = ?'
+            );
+            $record->execute([(int) $applicationId, $eventDateId]);
+            $attendanceRecord = $record->fetch();
             $this->db->commit();
         } catch (Throwable $exception) {
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
             }
+            if ($exception instanceof \PDOException && (int) ($exception->errorInfo[1] ?? 0) === 1062) {
+                $this->rejectAttendanceScan(
+                    'duplicate_scan_request',
+                    'This scan request was already processed. Check your attendance status.',
+                    409,
+                    $eventDateId,
+                    (int) $date['event_id']
+                );
+            }
             throw $exception;
         }
-        if ($logAction !== null) {
-            $this->logActivity($logAction, 'event_date', $eventDateId, ['event_id' => (int) $date['event_id']]);
-        }
+
+        $recordedAt = $action === 'check_in'
+            ? $attendanceRecord['scanned_at']
+            : $attendanceRecord['checked_out_at'];
+        $this->logActivity($logAction, 'event_date', $eventDateId, [
+            'event_id' => (int) $date['event_id'],
+            'action' => $action,
+        ]);
         Http::json([
-            'message' => $message,
+            'message' => $action === 'check_in' ? 'Time In recorded successfully.' : 'Time Out recorded successfully. Attendance completed.',
             'status' => 'present',
             'action' => $action,
+            'completed' => $action === 'check_out',
             'eventDateId' => $eventDateId,
+            'recordedAt' => $recordedAt,
         ]);
     }
 
@@ -4274,7 +4567,7 @@ final class ApiController
         }
         $statement = $this->db->prepare(
             'SELECT p.id, p.title, p.status, p.period_start, p.period_end, p.total_estimated_cost, p.created_at,
-                    CONCAT(u.first_name, \' \', u.last_name) AS proposer,
+                    CONCAT(u.first_name, \' \', u.last_name) AS proponent,
                     (SELECT COUNT(*) FROM events e WHERE e.proposal_id = p.id) AS event_count,
                     (SELECT COUNT(*) FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.invitation_status = \'accepted\') AS partner_count
              FROM proposals p JOIN users u ON u.id = p.owner_user_id
@@ -4404,7 +4697,7 @@ final class ApiController
                     "SELECT a.id, e.title AS subject, p.title AS context, a.status,
                             COALESCE(a.scanned_at, CONCAT(ed.event_date, ' 00:00:00')) AS report_date,
                             CONCAT(u.first_name, ' ', u.last_name,
-                                IF(a.checked_out_at IS NULL, '', CONCAT(' · Checked out ', a.checked_out_at)),
+                                IF(a.checked_out_at IS NULL, '', CONCAT(' · Time Out ', a.checked_out_at)),
                                 ' · Verification: ', a.verification_status,
                                 IF(a.note IS NULL, '', CONCAT(' · ', a.note))) AS details,
                             e.organizer_user_id AS partner_id, $category AS category,
@@ -4711,14 +5004,41 @@ final class ApiController
             'SELECT AVG(rating) AS average_rating, COUNT(*) AS evaluation_count
              FROM evaluations WHERE proposal_id = ?'
         );
-        $evaluations->execute([$proposalId]);
+        $evaluations->execute([$proposalId]        );
+        $owner = $this->db->prepare(
+            'SELECT u.id, u.first_name, u.last_name, p.organization_name, p.organization_type
+             FROM users u LEFT JOIN partners p ON p.user_id = u.id
+             WHERE u.id = ?'
+        );
+        $owner->execute([(int) $project['owner_user_id']]);
+        $classifications = $this->db->prepare(
+            'SELECT classification FROM proposal_classifications WHERE proposal_id = ? ORDER BY classification'
+        );
+        $classifications->execute([$proposalId]);
+        $categories = $this->db->prepare(
+            'SELECT c.name FROM proposal_categories pc
+             JOIN categories c ON c.id = pc.category_id
+             WHERE pc.proposal_id = ? ORDER BY c.name'
+        );
+        $categories->execute([$proposalId]);
+        $userRelationship = $this->db->prepare(
+            'SELECT relationship, invitation_status
+             FROM proposal_partners
+             WHERE proposal_id = ? AND partner_user_id = ?'
+        );
+        $userRelationship->execute([$proposalId, (int) $user['id']]);
+        $relationship = $userRelationship->fetch() ?: [];
 
         Http::json([
             'project' => [
                 'id' => (int) $project['id'],
+                'ownerUserId' => (int) $project['owner_user_id'],
                 'title' => $project['title'],
                 'summary' => $project['summary'],
                 'status' => $project['status'],
+                'venue' => $project['venue'] ?? '',
+                'acceptsVolunteers' => (bool) ($project['accepts_volunteers'] ?? true),
+                'volunteerApprovalMode' => $project['volunteer_approval_mode'] ?? 'manual',
                 'periodStart' => $project['period_start'],
                 'periodEnd' => $project['period_end'],
                 'duration' => $project['stated_duration'],
@@ -4732,6 +5052,11 @@ final class ApiController
                 'possibleRisks' => $project['possible_risks'] ?? '',
                 'expectedPrivatePartnerships' => $project['expected_private_partnerships'] ?? '',
             ],
+            'owner' => $owner->fetch() ?: null,
+            'userRelationship' => $relationship['relationship'] ?? null,
+            'userInvitationStatus' => $relationship['invitation_status'] ?? null,
+            'classifications' => array_column($classifications->fetchAll(), 'classification'),
+            'categories' => array_column($categories->fetchAll(), 'name'),
             'partners' => $partners->fetchAll(),
             'schedules' => $schedules->fetchAll(),
             'attendance' => $attendance->fetchAll(),

@@ -251,12 +251,27 @@ CREATE TABLE attendance (
     verification_status ENUM('pending', 'verified') NOT NULL DEFAULT 'pending',
     marked_by BIGINT UNSIGNED NULL,
     note VARCHAR(500) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     UNIQUE KEY uq_attendance_application_date (application_id, event_date_id),
     KEY idx_attendance_event_date_status (event_date_id, status),
     CONSTRAINT fk_attendance_application FOREIGN KEY (application_id) REFERENCES event_applications (id) ON DELETE CASCADE,
     CONSTRAINT fk_attendance_event_date FOREIGN KEY (event_date_id) REFERENCES event_dates (id) ON DELETE CASCADE,
-    CONSTRAINT fk_attendance_marker FOREIGN KEY (marked_by) REFERENCES users (id) ON DELETE SET NULL
+    CONSTRAINT fk_attendance_marker FOREIGN KEY (marked_by) REFERENCES users (id) ON DELETE SET NULL,
+    CONSTRAINT chk_attendance_time_order CHECK (
+        checked_out_at IS NULL OR (scanned_at IS NOT NULL AND checked_out_at >= scanned_at)
+    )
+) ENGINE=InnoDB;
+
+CREATE TABLE attendance_scan_requests (
+    scan_request_id CHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    attendance_id BIGINT UNSIGNED NOT NULL,
+    action ENUM('check_in', 'check_out') NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (scan_request_id),
+    KEY idx_attendance_scan_requests_attendance (attendance_id),
+    CONSTRAINT fk_attendance_scan_requests_record FOREIGN KEY (attendance_id) REFERENCES attendance (id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE budget_items (

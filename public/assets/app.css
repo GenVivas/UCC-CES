@@ -536,6 +536,9 @@ body.auth-entry {
 .dashboard-event-date strong { font: 700 15px Manrope, sans-serif; }
 .dashboard-event-date small { font-size: 9px; text-transform: uppercase; }
 .proposal-register { margin-top: 20px; border-color: #dfeae2; border-radius: 12px; box-shadow: 0 3px 12px #0a49200a; }
+.proposal-register-toolbar { display: flex; justify-content: flex-end; margin: 0 0 14px; }
+.proposal-register-toolbar .button, .proposal-create-panel .proposal-wizard-actions .button { width: auto; }
+.proposal-create-panel { border-color: #dfeae2; border-radius: 12px; box-shadow: 0 3px 12px #0a49200a; }
 .proposal-filters { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(170px, 230px); align-items: end; gap: 12px; margin-bottom: 16px; }
 .proposal-filters label { font-size: 11px; }
 .proposal-filters input, .proposal-filters select { border-color: #d5e3d8; border-radius: 8px; }
@@ -545,8 +548,15 @@ body.auth-entry {
 .proposal-table th { background: #f4f9f5; color: #566a5d; font-size: 9px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
 .proposal-table tr:last-child td { border-bottom: 0; }
 .proposal-table td { color: #53665a; }
+.proposal-register .proposal-table tbody tr { cursor: pointer; transition: background-color .15s ease, box-shadow .15s ease; }
+.proposal-register .proposal-table tbody tr:hover { background: #f5faf6; }
+.proposal-register .proposal-table tbody tr:focus-visible { position: relative; outline: 2px solid #19814a; outline-offset: -2px; }
 .proposal-title-cell { min-width: 190px; color: #263f30 !important; font-weight: 650; }
 .proposal-title-cell strong { font-size: 12px; }
+.proposal-proponent-cell strong, .proposal-proponent-cell small { display: block; }
+.proposal-proponent-cell strong { color: #294637; }
+.proposal-proponent-cell small { margin-top: 3px; color: #74847a; font-size: 10px; }
+.proposal-partnership-cell { min-width: 210px; max-width: 340px; white-space: pre-line; }
 .proposal-review-note { display: block; max-width: 240px; margin-top: 5px; color: #78877f; font-size: 9px; white-space: normal; }
 .proposal-attachment-count { display: block; margin-top: 5px; color: #74847a; font-size: 10px; font-weight: 500; }
 .proposal-upload-modal {
@@ -695,6 +705,13 @@ body.auth-entry {
 .project-dossier-documents a { display: block; width: fit-content; max-width: 100%; margin-top: 8px; color: #246044; font-size: 11px; overflow-wrap: anywhere; }
 .project-dossier-footer { display: flex; justify-content: flex-end; gap: 9px; padding: 14px 26px; border-top: 1px solid #e6eee8; background: #fbfdfb; }
 .project-dossier-footer .button { width: auto; text-decoration: none; }
+.project-dossier-page { display: grid; gap: 14px; }
+.project-dossier-page .project-dossier-content { max-height: none; overflow: visible; border: 1px solid #e0eae2; border-radius: 14px; background: #fff; box-shadow: 0 4px 16px #0a49200a; }
+.project-dossier-page .project-dossier-body { overflow: visible; }
+.project-dossier-page .project-dossier-header { border-radius: 14px 14px 0 0; }
+.proposal-detail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border: 1px solid #e0eae2; border-radius: 12px; background: #fff; }
+.proposal-detail-actions .button { width: auto; }
+.proposal-detail-actions textarea { flex: 1 1 100%; min-width: min(100%, 260px); min-height: 64px; }
 @keyframes project-dossier-enter { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .report-results { margin-top: 16px; }
 .report-table { min-width: 760px; }
@@ -1172,6 +1189,8 @@ body.password-change-entry .workspace { margin-left: 0; }
     .project-dossier-fields .project-brief-field { grid-template-columns: minmax(0, 1fr); gap: 5px; }
     .project-dossier-related-grid { grid-template-columns: minmax(0, 1fr); }
     .project-dossier-footer { padding: 12px 14px; }
+    .proposal-detail-actions { align-items: stretch; }
+    .proposal-detail-actions .button { flex: 1 1 auto; }
 }
 @media (max-width: 380px) {
     body.app-entry .brand strong { max-width: 115px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
