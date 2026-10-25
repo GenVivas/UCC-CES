@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#123d36">
     <title>UCC-CES | Partnership &amp; Project Management</title>
-    <link rel="stylesheet" href="/CES/assets/app.css">
-    <script src="/CES/assets/app.js" defer></script>
+    <link rel="icon" type="image/png" href="/UCC-CES/assets/img/ucc-logo.png">
+    <link rel="stylesheet" href="/UCC-CES/assets/app.css">
+    <script src="/UCC-CES/assets/app.js" defer></script>
 </head>
 <body>
     <header class="topbar">
-        <a class="brand" href="./" aria-label="UCC-CES home">
-            <span class="brand-mark" aria-hidden="true"><span>UCC</span></span>
+        <a class="brand" href="/UCC-CES/" aria-label="UCC-CES home">
+            <img class="brand-mark" src="/UCC-CES/assets/img/ucc-logo.png" alt="University of Caloocan City logo">
             <span class="brand-copy"><strong>University of Caloocan City</strong><small>Community Extension Services</small></span>
         </a>
         <div id="top-actions" class="top-actions" hidden>
@@ -40,7 +41,7 @@
         <section id="auth-view" class="auth-layout">
             <div class="intro">
                 <div class="intro-identity">
-                    <span class="crest-mark" aria-hidden="true"><span>UCC</span><i></i></span>
+                    <img class="crest-mark" src="/UCC-CES/assets/img/ucc-logo.png" alt="University of Caloocan City seal">
                     <p class="eyebrow">COMMUNITY EXTENSION SERVICES</p>
                 </div>
                 <h1>University of<br>Caloocan City</h1>
@@ -67,6 +68,7 @@
                     <label>Email address<input name="email" type="email" autocomplete="username" placeholder="name@example.com" required></label>
                     <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label>
                     <button class="button button-primary" type="submit">Sign in <span aria-hidden="true">→</span></button>
+                    <button id="forgot-password-button" class="button button-quiet forgot-password-button" type="button">Forgot password?</button>
                     <p class="auth-card-footnote"><span class="security-icon" aria-hidden="true">✓</span> Secure access for UCC partners and volunteers</p>
                 </form>
                 <form id="register-form" class="form-stack" hidden novalidate>
@@ -138,20 +140,20 @@
             <aside class="sidebar">
                 <p class="eyebrow">WORKSPACE</p>
                 <nav id="main-nav" class="main-nav" aria-label="Main navigation">
-                    <a href="./" data-page="overview" class="nav-item is-active">Overview</a>
-                    <a href="proposals" data-page="proposals" class="nav-item" data-roles="admin,partner">Proposals</a>
-                    <a href="events" data-page="events" class="nav-item">Events &amp; attendance</a>
-                    <a href="applications" data-page="applications" class="nav-item" data-roles="volunteer">My Applications</a>
-                    <a href="joined-events" data-page="joined-events" class="nav-item" data-roles="volunteer">Joined Events</a>
-                    <a href="certificates" data-page="certificates" class="nav-item" data-roles="volunteer">Certificates</a>
-                    <a href="evaluations" data-page="evaluations" class="nav-item" data-roles="volunteer">Evaluation Reports</a>
-                    <a href="documentations" data-page="documentations" class="nav-item" data-roles="volunteer">My Documentations</a>
-                    <a href="accounts" data-page="accounts" class="nav-item admin-only" hidden>Accounts</a>
-                    <a href="reports" data-page="reports" class="nav-item" data-roles="admin,partner">Reports</a>
-                    <a href="evaluations" data-page="evaluations" class="nav-item" data-roles="admin,partner">Evaluation</a>
-                    <a href="event-history" data-page="event-history" class="nav-item">Event History &amp; Documentations</a>
-                    <a href="activity-logs" data-page="activity-logs" class="nav-item admin-only" hidden>Activity Logs</a>
-                    <a href="profile" data-page="profile" class="nav-item">My Profile</a>
+                    <a href="/UCC-CES/" data-page="overview" class="nav-item is-active">Overview</a>
+                    <a href="/UCC-CES/proposals" data-page="proposals" class="nav-item" data-roles="admin,partner">Proposals</a>
+                    <a href="/UCC-CES/events" data-page="events" class="nav-item">Events &amp; attendance</a>
+                    <a href="/UCC-CES/applications" data-page="applications" class="nav-item" data-roles="volunteer">My Applications</a>
+                    <a href="/UCC-CES/joined-events" data-page="joined-events" class="nav-item" data-roles="volunteer">Joined Events</a>
+                    <a href="/UCC-CES/certificates" data-page="certificates" class="nav-item" data-roles="volunteer">Certificates</a>
+                    <a href="/UCC-CES/evaluations" data-page="evaluations" class="nav-item" data-roles="volunteer">Evaluation Reports</a>
+                    <a href="/UCC-CES/documentations" data-page="documentations" class="nav-item" data-roles="partner,volunteer">My Documentations</a>
+                    <a href="/UCC-CES/accounts" data-page="accounts" class="nav-item admin-only" hidden>Accounts</a>
+                    <a href="/UCC-CES/reports" data-page="reports" class="nav-item" data-roles="admin,partner">Reports</a>
+                    <a href="/UCC-CES/evaluations" data-page="evaluations" class="nav-item" data-roles="admin">Evaluation</a>
+                    <a href="/UCC-CES/event-history" data-page="event-history" class="nav-item">Event History &amp; Documentations</a>
+                    <a href="/UCC-CES/activity-logs" data-page="activity-logs" class="nav-item admin-only" hidden>Activity Logs</a>
+                    <a href="/UCC-CES/profile" data-page="profile" class="nav-item">My Profile</a>
                 </nav>
                 <div class="sidebar-foot">University of Caloocan City<br>Community Extension Services</div>
             </aside>

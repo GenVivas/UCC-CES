@@ -39,9 +39,12 @@ final class ApiController
             $this->authorizeModuleRoute($method, $path);
             $this->route($method, $path);
             Http::json(['error' => 'Not found.'], 404);
+        } catch (\PDOException $exception) {
+            error_log(sprintf('Database API error: %s in %s:%d', $exception->getMessage(), $exception->getFile(), $exception->getLine()));
+            Http::json(['error' => 'The request could not be completed because of a database error. Please contact the CES administrator.'], 500);
         } catch (RuntimeException $exception) {
             $status = $exception->getCode();
-            $status = $status >= 400 && $status <= 599 ? $status : 400;
+            $status = is_int($status) && $status >= 400 && $status <= 599 ? $status : 400;
             Http::json(['error' => $exception->getMessage()], $status);
         } catch (Throwable $exception) {
             error_log(sprintf('Unhandled API error: %s in %s:%d', $exception->getMessage(), $exception->getFile(), $exception->getLine()));
@@ -59,6 +62,15 @@ final class ApiController
         }
         if ($path === '/login' && $method === 'POST') {
             $this->login();
+        }
+        if ($path === '/password/forgot' && $method === 'POST') {
+            $this->requestPasswordReset();
+        }
+        if ($path === '/password/forgot/verify' && $method === 'POST') {
+            $this->verifyPasswordResetOtp();
+        }
+        if ($path === '/password/reset' && $method === 'POST') {
+            $this->resetPassword();
         }
         if ($path === '/password/change' && $method === 'POST') {
             $this->changePassword();
@@ -79,8 +91,10 @@ final class ApiController
             $this->activityLogs();
         }
         if ($path === '/logout' && $method === 'POST') {
-            session_destroy();
-            Http::json(['message' => 'You have been signed out.']);
+            unset($_SESSION['user']);
+            session_regenerate_id(true);
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+            Http::json(['message' => 'You have been signed out.', 'csrfToken' => $_SESSION['csrf_token']]);
         }
         if ($path === '/overview' && $method === 'GET') {
             $this->overview();
@@ -91,6 +105,9 @@ final class ApiController
         }
         if ($path === '/collaborators/partners' && $method === 'GET') {
             $this->collaboratorPartnerOptions();
+        }
+        if ($path === '/partners/accounts' && $method === 'POST') {
+            $this->createPendingPartnerAccount();
         }
         if ($path === '/accounts' && $method === 'GET') {
             $this->listAccounts();
@@ -129,6 +146,15 @@ final class ApiController
         if (preg_match('#^/volunteer/documentations/([0-9]+)/file$#', $path, $matches) && $method === 'GET') {
             $this->downloadVolunteerDocumentation(Http::positiveId($matches[1]));
         }
+        if ($path === '/partner/documentations' && $method === 'GET') {
+            $this->partnerDocumentations();
+        }
+        if ($path === '/partner/documentations' && $method === 'POST') {
+            $this->createPartnerEventDocumentation();
+        }
+        if (preg_match('#^/partner/documentations/([0-9]+)/file$#', $path, $matches) && $method === 'GET') {
+            $this->downloadPartnerEventDocumentation(Http::positiveId($matches[1]));
+        }
         if (preg_match('#^/volunteer/documentations/([0-9]+)$#', $path, $matches) && $method === 'DELETE') {
             $this->deleteVolunteerDocumentation(Http::positiveId($matches[1]));
         }
@@ -164,6 +190,9 @@ final class ApiController
         }
         if (preg_match('#^/proposals/([0-9]+)/review$#', $path, $matches) && $method === 'POST') {
             $this->reviewProposal(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/proposals/([0-9]+)/activation-summary$#', $path, $matches) && $method === 'GET') {
+            $this->proposalActivationSummary(Http::positiveId($matches[1]));
         }
         if (preg_match('#^/proposals/([0-9]+)/budget-items$#', $path, $matches) && $method === 'GET') {
             $this->listBudgetItems(Http::positiveId($matches[1]));
@@ -273,6 +302,9 @@ final class ApiController
         }
         if (preg_match('#^/accounts(?:/|$)#', $path)) {
             Http::requireRole('admin');
+        }
+        if (preg_match('#^/partner/documentations(?:/|$)#', $path)) {
+            Http::requireRole('partner');
         }
         if (preg_match('#^/reports(?:/|$)#', $path)) {
             Http::requireRole('admin', 'partner');
@@ -434,6 +466,160 @@ final class ApiController
         Http::json(['user' => $_SESSION['user'], 'csrfToken' => $_SESSION['csrf_token']]);
     }
 
+    private function requestPasswordReset(): never
+    {
+        $data = Http::body();
+        $email = strtolower(trim((string) ($data['email'] ?? '')));
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 190) {
+            throw new RuntimeException('Enter a valid email address.');
+        }
+        if (($this->config['mail']['host'] ?? '') === '' || ($this->config['mail']['from'] ?? '') === '') {
+            throw new RuntimeException('Password recovery email is not configured. Contact the CES administrator.', 503);
+        }
+
+        $ip = filter_var($_SERVER['REMOTE_ADDR'] ?? '', FILTER_VALIDATE_IP) ?: 'unknown';
+        $ipHash = hash('sha256', $ip);
+        $rateLimit = $this->db->prepare(
+            'SELECT
+                SUM(email = ? AND requested_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)) AS email_requests,
+                SUM(request_ip_hash = ? AND requested_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)) AS ip_requests
+             FROM password_reset_otps
+             WHERE requested_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)'
+        );
+        $rateLimit->execute([$email, $ipHash]);
+        $limits = $rateLimit->fetch() ?: [];
+        if ((int) ($limits['email_requests'] ?? 0) < 3 && (int) ($limits['ip_requests'] ?? 0) < 10) {
+            $userQuery = $this->db->prepare(
+                "SELECT id, email, first_name, last_name FROM users
+                 WHERE email = ? AND account_status = 'approved'"
+            );
+            $userQuery->execute([$email]);
+            $user = $userQuery->fetch() ?: null;
+            $code = $user ? (string) random_int(100000, 999999) : null;
+            $insert = $this->db->prepare(
+                'INSERT INTO password_reset_otps (email, request_ip_hash, code_hash, expires_at)
+                 VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE))'
+            );
+            $insert->execute([$email, $ipHash, $code === null ? null : password_hash($code, PASSWORD_DEFAULT)]);
+            if ($user && $code !== null) {
+                try {
+                    \Ces\NotificationService::sendRequired(
+                        $this->config['mail'],
+                        $user['email'],
+                        $user['first_name'] . ' ' . $user['last_name'],
+                        'UCC-CES password reset code',
+                        "Your UCC-CES password reset code is $code. It expires in 10 minutes. If you did not request a password reset, ignore this message."
+                    );
+                } catch (RuntimeException $exception) {
+                    $this->db->prepare(
+                        'UPDATE password_reset_otps SET code_hash = NULL, consumed_at = NOW() WHERE id = ?'
+                    )->execute([(int) $this->db->lastInsertId()]);
+                    throw $exception;
+                }
+            }
+        }
+        Http::json([
+            'message' => 'If an approved account uses that address, a verification code has been sent.',
+        ]);
+    }
+
+    private function verifyPasswordResetOtp(): never
+    {
+        $data = Http::body();
+        $email = strtolower(trim((string) ($data['email'] ?? '')));
+        $code = $data['code'] ?? '';
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || !is_string($code) || !preg_match('/^\d{6}$/', $code)) {
+            throw new RuntimeException('Enter the email address and six-digit verification code.');
+        }
+        $this->db->beginTransaction();
+        $logAction = null;
+        try {
+            $statement = $this->db->prepare(
+                'SELECT id, code_hash, attempts FROM password_reset_otps
+                 WHERE email = ? AND consumed_at IS NULL AND code_hash IS NOT NULL
+                   AND expires_at > NOW() AND attempts < 5
+                 ORDER BY id DESC LIMIT 1 FOR UPDATE'
+            );
+            $statement->execute([$email]);
+            $reset = $statement->fetch();
+            if (!$reset || !is_string($reset['code_hash']) || !password_verify($code, $reset['code_hash'])) {
+                if ($reset) {
+                    $this->db->prepare('UPDATE password_reset_otps SET attempts = attempts + 1 WHERE id = ?')
+                        ->execute([(int) $reset['id']]);
+                }
+                $this->db->commit();
+                throw new RuntimeException('The verification code is invalid or expired.', 400);
+            }
+            $token = bin2hex(random_bytes(32));
+            $update = $this->db->prepare(
+                'UPDATE password_reset_otps
+                 SET code_hash = NULL, verified_at = NOW(), reset_token_hash = ?,
+                     reset_expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE)
+                 WHERE id = ?'
+            );
+            $update->execute([hash('sha256', $token), (int) $reset['id']]);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+        Http::json(['resetToken' => $token]);
+    }
+
+    private function resetPassword(): never
+    {
+        $data = Http::body();
+        $email = strtolower(trim((string) ($data['email'] ?? '')));
+        $token = $data['resetToken'] ?? '';
+        $password = $data['newPassword'] ?? '';
+        $confirmation = $data['confirmation'] ?? '';
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL) || !is_string($token) ||
+            !preg_match('/^[a-f0-9]{64}$/', $token)) {
+            throw new RuntimeException('The password reset session is invalid or expired.', 400);
+        }
+        if (!is_string($password) || strlen($password) < 12 || strlen($password) > 200 ||
+            !is_string($confirmation) || !hash_equals($password, $confirmation)) {
+            throw new RuntimeException('Use a password of at least 12 characters and confirm it correctly.');
+        }
+        $this->db->beginTransaction();
+        try {
+            $statement = $this->db->prepare(
+                'SELECT id, reset_token_hash FROM password_reset_otps
+                 WHERE email = ? AND verified_at IS NOT NULL AND consumed_at IS NULL
+                   AND reset_expires_at > NOW()
+                 ORDER BY id DESC LIMIT 1 FOR UPDATE'
+            );
+            $statement->execute([$email]);
+            $reset = $statement->fetch();
+            if (!$reset || !is_string($reset['reset_token_hash']) ||
+                !hash_equals($reset['reset_token_hash'], hash('sha256', $token))) {
+                throw new RuntimeException('The password reset session is invalid or expired.', 400);
+            }
+            $account = $this->db->prepare(
+                "UPDATE users SET password_hash = ?
+                 WHERE email = ? AND account_status = 'approved'"
+            );
+            $account->execute([password_hash($password, PASSWORD_DEFAULT), $email]);
+            if ($account->rowCount() !== 1) {
+                throw new RuntimeException('The account is unavailable for password recovery.', 404);
+            }
+            $consume = $this->db->prepare(
+                'UPDATE password_reset_otps SET consumed_at = NOW(), reset_token_hash = NULL
+                 WHERE email = ? AND consumed_at IS NULL'
+            );
+            $consume->execute([$email]);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+        Http::json(['message' => 'Your password has been reset. You can now sign in.']);
+    }
+
     private function changePassword(): never
     {
         $sessionUser = Http::user();
@@ -579,7 +765,7 @@ final class ApiController
              JOIN proposals p ON p.id = e.proposal_id
              JOIN users u ON u.id = ve.volunteer_user_id
              WHERE $whereSql
-             ORDER BY ve.created_at DESC, ve.id DESC LIMIT 1000";
+             ORDER BY ve.created_at DESC, ve.id DESC";
         $rowsStatement = $this->db->prepare($rowsQuery);
         $rowsStatement->execute($params);
         $rows = $rowsStatement->fetchAll();
@@ -620,7 +806,7 @@ final class ApiController
         $user = Http::requireRole('admin', 'partner', 'volunteer');
         $today = date('Y-m-d');
         $eventWhere = [
-            '(SELECT MAX(history_date.event_date) FROM event_dates history_date WHERE history_date.event_id = e.id) <= ?',
+            '(SELECT MAX(history_date.event_date) FROM event_dates history_date WHERE history_date.event_id = e.id) < ?',
         ];
         $eventParams = [$today];
         if ($user['role'] === 'partner') {
@@ -648,7 +834,7 @@ final class ApiController
              JOIN event_dates ed ON ed.event_id = e.id
              WHERE p.status IN ('approved', 'active') AND " . implode(' AND ', $eventWhere) . "
              GROUP BY e.id, e.title, p.title, p.status
-             ORDER BY date_end DESC, e.title LIMIT 500"
+             ORDER BY date_end DESC, e.title"
         );
         $eventsStatement->execute($eventParams);
         if ($user['role'] === 'volunteer') {
@@ -656,14 +842,14 @@ final class ApiController
                 'SELECT id, documentation_type AS document_type, original_name, description,
                         created_at, mime_type, file_size, \'My Documentation\' AS project_title
                  FROM volunteer_documentations WHERE volunteer_user_id = ?
-                 ORDER BY created_at DESC, id DESC LIMIT 500'
+                 ORDER BY created_at DESC, id DESC'
             );
             $documentsStatement->execute([(int) $user['id']]);
             $certificatesStatement = $this->db->prepare(
                 'SELECT c.id, e.title AS event_title, p.title AS project_title, c.issued_at
                  FROM certificates c JOIN events e ON e.id = c.event_id
                  JOIN proposals p ON p.id = e.proposal_id
-                 WHERE c.volunteer_user_id = ? ORDER BY c.issued_at DESC LIMIT 500'
+                 WHERE c.volunteer_user_id = ? ORDER BY c.issued_at DESC'
             );
             $certificatesStatement->execute([(int) $user['id']]);
         } else {
@@ -680,7 +866,7 @@ final class ApiController
                 "SELECT d.id, d.document_type, d.original_name, d.description, d.created_at,
                         d.mime_type, d.file_size, p.title AS project_title
                  FROM documents d JOIN proposals p ON p.id = d.proposal_id" . $proposalWhere . "
-                 ORDER BY d.created_at DESC, d.id DESC LIMIT 500"
+                 ORDER BY d.created_at DESC, d.id DESC"
             );
             $documentsStatement->execute($documentParams);
             $certificateWhere = '';
@@ -695,7 +881,7 @@ final class ApiController
                 "SELECT c.id, e.title AS event_title, p.title AS project_title, c.issued_at
                  FROM certificates c JOIN events e ON e.id = c.event_id
                  JOIN proposals p ON p.id = e.proposal_id" . $certificateWhere . "
-                 ORDER BY c.issued_at DESC LIMIT 500"
+                 ORDER BY c.issued_at DESC"
             );
             $certificatesStatement->execute($certificateParams);
         }
@@ -735,7 +921,7 @@ final class ApiController
                     CONCAT(u.first_name, \' \', u.last_name) AS actor_name, u.email AS actor_email
              FROM activity_logs al LEFT JOIN users u ON u.id = al.actor_user_id' .
             ($where ? ' WHERE ' . implode(' AND ', $where) : '') .
-            ' ORDER BY al.created_at DESC, al.id DESC LIMIT 500'
+            ' ORDER BY al.created_at DESC, al.id DESC'
         );
         $statement->execute($params);
         Http::json(['logs' => $statement->fetchAll()]);
@@ -947,24 +1133,24 @@ final class ApiController
         }
 
         $upcomingStatement = $this->db->prepare(
-            "SELECT e.id, e.title, p.title AS project_title, MIN(ed.event_date) AS event_date,
-                    (SELECT GROUP_CONCAT(DISTINCT activity.venue ORDER BY activity.venue SEPARATOR ', ')
+            "SELECT e.id, e.title, e.venue, p.title AS project_title, MIN(ed.event_date) AS event_date,
+                    COALESCE((SELECT GROUP_CONCAT(DISTINCT activity.venue ORDER BY activity.venue SEPARATOR ', ')
                      FROM event_dates future_date
                      JOIN activities activity ON activity.event_date_id = future_date.id
-                     WHERE future_date.event_id = e.id AND future_date.event_date >= CURRENT_DATE) AS venue
+                     WHERE future_date.event_id = e.id AND future_date.event_date >= CURRENT_DATE), e.venue) AS venue
              FROM event_applications ea
              JOIN events e ON e.id = ea.event_id
              JOIN proposals p ON p.id = e.proposal_id
              JOIN event_dates ed ON ed.event_id = e.id
              WHERE ea.volunteer_user_id = ? AND ea.status = 'approved'
                AND p.status IN ('approved', 'active') AND ed.event_date >= CURRENT_DATE
-             GROUP BY e.id, e.title, p.title
+             GROUP BY e.id, e.title, e.venue, p.title
              ORDER BY event_date, e.title
              LIMIT 8"
         );
         $upcomingStatement->execute([$userId]);
         $activityStatement = $this->db->prepare(
-            "SELECT ed.event_date, e.title AS event_title, a.scanned_at,
+            "SELECT ed.event_date, e.title AS event_title, a.scanned_at, a.checked_out_at,
                     SUM(TIME_TO_SEC(TIMEDIFF(activity.end_time, activity.start_time)) / 3600) AS rendered_hours
              FROM attendance a
              JOIN event_applications ea ON ea.id = a.application_id
@@ -972,7 +1158,7 @@ final class ApiController
              JOIN events e ON e.id = ed.event_id
              LEFT JOIN activities activity ON activity.event_date_id = ed.id
              WHERE ea.volunteer_user_id = ? AND a.status = 'present'
-             GROUP BY ed.id, ed.event_date, e.title, a.scanned_at
+             GROUP BY ed.id, ed.event_date, e.title, a.scanned_at, a.checked_out_at
              ORDER BY ed.event_date DESC
              LIMIT 6"
         );
@@ -1017,7 +1203,7 @@ final class ApiController
         );
         $applications->execute([$userId]);
         $attendance = $this->db->prepare(
-            "SELECT a.event_date_id, ed.event_date, a.status, a.scanned_at,
+            "SELECT a.event_date_id, ed.event_date, a.status, a.scanned_at, a.checked_out_at, a.verification_status,
                     e.id AS event_id, e.title AS event_title
              FROM attendance a
              JOIN event_applications ea ON ea.id = a.application_id
@@ -1031,7 +1217,8 @@ final class ApiController
             "SELECT ea.id AS application_id, e.id AS event_id, ed.id AS event_date_id, ed.event_date,
                     MIN(activity.start_time) AS start_time, MAX(activity.end_time) AS end_time,
                     GROUP_CONCAT(DISTINCT activity.venue ORDER BY activity.venue SEPARATOR ', ') AS venue,
-                    attendance.status AS attendance_status, attendance.scanned_at
+                    attendance.status AS attendance_status, attendance.scanned_at,
+                    attendance.checked_out_at, attendance.verification_status
              FROM event_applications ea
              JOIN events e ON e.id = ea.event_id
              JOIN event_dates ed ON ed.event_id = e.id
@@ -1039,7 +1226,8 @@ final class ApiController
              LEFT JOIN attendance ON attendance.application_id = ea.id
                                   AND attendance.event_date_id = ed.id
              WHERE ea.volunteer_user_id = ? AND ea.status = 'approved'
-             GROUP BY ea.id, e.id, ed.id, ed.event_date, attendance.status, attendance.scanned_at
+             GROUP BY ea.id, e.id, ed.id, ed.event_date, attendance.status, attendance.scanned_at,
+                      attendance.checked_out_at, attendance.verification_status
              ORDER BY ed.event_date, start_time"
         );
         $schedules->execute([$userId]);
@@ -1062,8 +1250,8 @@ final class ApiController
             throw new RuntimeException('Calendar month is invalid.');
         }
         $statement = $this->db->prepare(
-            "SELECT e.id, e.title, p.title AS project_title, ed.event_date,
-                    MIN(activity.venue) AS venue,
+            "SELECT e.id, e.title, e.venue, p.title AS project_title, ed.event_date,
+                    COALESCE(MIN(activity.venue), e.venue) AS venue,
                     CASE WHEN ed.event_date = CURRENT_DATE THEN 'ongoing'
                          WHEN ed.event_date > CURRENT_DATE THEN 'upcoming'
                          ELSE 'completed' END AS event_status,
@@ -1081,7 +1269,7 @@ final class ApiController
              LEFT JOIN activities activity ON activity.event_date_id = ed.id
              WHERE p.status IN ('approved', 'active') AND p.accepts_volunteers = 1
                AND ed.event_date >= ? AND ed.event_date < ?
-             GROUP BY e.id, e.title, p.title, ed.id, ed.event_date, e.capacity,
+             GROUP BY e.id, e.title, e.venue, p.title, ed.id, ed.event_date, e.capacity,
                       e.applications_open_at, e.applications_close_at
              ORDER BY ed.event_date, e.title"
         );
@@ -1203,6 +1391,155 @@ final class ApiController
         );
         $statement->execute([(int) $user['id']]);
         Http::json(['documentations' => $statement->fetchAll()]);
+    }
+
+    private function partnerDocumentations(): never
+    {
+        $user = Http::requireRole('partner');
+        $partnerId = (int) $user['id'];
+        $access = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+            SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+        ) OR EXISTS (
+            SELECT 1 FROM proposal_partners pp
+            WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+        ))';
+        $events = $this->db->prepare(
+            "SELECT e.id, e.title, p.title AS project_title, MIN(ed.event_date) AS date_start,
+                    MAX(ed.event_date) AS completion_date,
+                    DATE_ADD(MAX(ed.event_date), INTERVAL 3 DAY) AS upload_available_on,
+                    (DATE_ADD(MAX(ed.event_date), INTERVAL 3 DAY) <= CURDATE()) AS can_upload
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE p.status IN ('approved', 'active') AND $access
+             GROUP BY e.id, e.title, p.title
+             HAVING MAX(ed.event_date) < CURDATE()
+             ORDER BY completion_date DESC, e.title"
+        );
+        $events->execute([$partnerId, $partnerId, $partnerId, $partnerId]);
+        $documentation = $this->db->prepare(
+            "SELECT d.id, d.event_id, d.documentation_type, d.original_name, d.description,
+                    d.mime_type, d.file_size, d.created_at, e.title AS event_title,
+                    p.title AS project_title
+             FROM event_documentations d
+             JOIN events e ON e.id = d.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE p.status IN ('approved', 'active') AND $access
+               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) < CURDATE()
+             ORDER BY d.created_at DESC, d.id DESC"
+        );
+        $documentation->execute([$partnerId, $partnerId, $partnerId, $partnerId]);
+        Http::json([
+            'events' => $events->fetchAll(),
+            'documentations' => $documentation->fetchAll(),
+        ]);
+    }
+
+    private function createPartnerEventDocumentation(): never
+    {
+        $user = Http::requireRole('partner');
+        $data = $this->requestData();
+        $eventId = Http::positiveId((string) ($data['eventId'] ?? ''));
+        $type = (string) ($data['type'] ?? '');
+        $descriptionValue = $data['description'] ?? '';
+        if (!is_string($descriptionValue)) {
+            throw new RuntimeException('Documentation description must be text.');
+        }
+        $description = trim($descriptionValue);
+        if (!in_array($type, ['photo', 'report', 'accomplishment', 'other'], true) ||
+            mb_strlen($description, 'UTF-8') > 500) {
+            throw new RuntimeException('Choose a documentation type and provide an optional description up to 500 characters.');
+        }
+        $partnerId = (int) $user['id'];
+        $access = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+            SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+        ) OR EXISTS (
+            SELECT 1 FROM proposal_partners pp
+            WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+        ))';
+        $event = $this->db->prepare(
+            "SELECT e.id
+             FROM events e JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE e.id = ? AND p.status IN ('approved', 'active') AND $access
+             GROUP BY e.id
+             HAVING MAX(ed.event_date) < CURDATE()
+                AND MAX(ed.event_date) <= DATE_SUB(CURDATE(), INTERVAL 3 DAY)"
+        );
+        $event->execute([$eventId, $partnerId, $partnerId, $partnerId, $partnerId]);
+        if (!$event->fetchColumn()) {
+            throw new RuntimeException('Documentation can only be uploaded for your completed events after three full days have passed.', 403);
+        }
+
+        $file = $_FILES['file'] ?? null;
+        $path = $this->storeUpload('file', 'partner-event-documentations', true, [
+            'application/pdf', 'image/jpeg', 'image/png',
+        ]);
+        $mime = (new \finfo(FILEINFO_MIME_TYPE))->file($file['tmp_name']);
+        $originalName = mb_substr(
+            preg_replace('/[\x00-\x1F\x7F]/', '_', basename((string) $file['name'])) ?: 'documentation',
+            0,
+            255,
+            'UTF-8'
+        );
+        try {
+            $insert = $this->db->prepare(
+                'INSERT INTO event_documentations
+                    (event_id, uploaded_by, documentation_type, relative_path, original_name, mime_type, file_size, description)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            $insert->execute([
+                $eventId, $partnerId, $type, $path, $originalName, $mime, (int) $file['size'], $description ?: null,
+            ]);
+        } catch (Throwable $exception) {
+            $this->removeStoredUpload($path);
+            throw $exception;
+        }
+        $documentationId = (int) $this->db->lastInsertId();
+        $this->logActivity('partner.event_documentation_uploaded', 'event_documentation', $documentationId, [
+            'event_id' => $eventId,
+            'type' => $type,
+        ]);
+        Http::json(['id' => $documentationId, 'message' => 'Event documentation uploaded.'], 201);
+    }
+
+    private function downloadPartnerEventDocumentation(int $documentationId): never
+    {
+        $user = Http::requireRole('partner');
+        $partnerId = (int) $user['id'];
+        $statement = $this->db->prepare(
+            "SELECT d.relative_path, d.original_name, d.mime_type
+             FROM event_documentations d
+             JOIN events e ON e.id = d.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE d.id = ? AND p.status IN ('approved', 'active')
+               AND (e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                    SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+               ) OR EXISTS (
+                    SELECT 1 FROM proposal_partners pp
+                    WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = 'accepted'
+               ))"
+        );
+        $statement->execute([$documentationId, $partnerId, $partnerId, $partnerId, $partnerId]);
+        $document = $statement->fetch();
+        if (!$document) {
+            throw new RuntimeException('Event documentation was not found.', 404);
+        }
+        $root = realpath($this->config['uploads_path']);
+        $relativePath = preg_replace('#^uploads/#', '', $document['relative_path']);
+        $file = $root === false
+            ? false
+            : realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if ($root === false || $file === false ||
+            !str_starts_with(strtolower($file), strtolower($root . DIRECTORY_SEPARATOR)) || !is_file($file)) {
+            throw new RuntimeException('Stored documentation file could not be found.', 404);
+        }
+        header('Content-Type: ' . $document['mime_type']);
+        header('Content-Length: ' . (string) filesize($file));
+        header('Content-Disposition: inline; filename="' . str_replace('"', '', $document['original_name']) . '"');
+        header('X-Content-Type-Options: nosniff');
+        readfile($file);
+        exit;
     }
 
     private function createVolunteerDocumentation(): never
@@ -1341,7 +1678,7 @@ final class ApiController
              LEFT JOIN partners p ON p.user_id = u.id
              LEFT JOIN volunteer_profiles vp ON vp.user_id = u.id ' .
             ($where ? str_replace('account_status', 'u.account_status', $where) : '') .
-            ' ORDER BY u.created_at DESC LIMIT 250'
+            ' ORDER BY u.created_at DESC'
         );
         $statement->execute($params);
         Http::json(['accounts' => $statement->fetchAll()]);
@@ -1439,7 +1776,7 @@ final class ApiController
                 'SELECT p.*, u.first_name, u.last_name,
                         (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         NULL AS user_relationship, NULL AS user_invitation_status
-                 FROM proposals p JOIN users u ON u.id = p.owner_user_id ORDER BY p.updated_at DESC LIMIT 250'
+                 FROM proposals p JOIN users u ON u.id = p.owner_user_id ORDER BY p.updated_at DESC'
             );
         } else {
             $statement = $this->db->prepare(
@@ -1450,7 +1787,7 @@ final class ApiController
                  FROM proposals p
                  JOIN users u ON u.id = p.owner_user_id
                  LEFT JOIN proposal_partners pp ON pp.proposal_id = p.id
-                 WHERE p.owner_user_id = ? OR pp.partner_user_id = ? ORDER BY p.updated_at DESC LIMIT 250'
+                 WHERE p.owner_user_id = ? OR pp.partner_user_id = ? ORDER BY p.updated_at DESC'
             );
             $statement->execute([(int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']]);
         }
@@ -1466,14 +1803,14 @@ final class ApiController
         try {
             $statement = $this->db->prepare(
                 'INSERT INTO proposals
-                    (owner_user_id, title, summary, proponents, activity_components, estimated_cost_items,
+                    (owner_user_id, title, summary, venue, proponents, activity_components, estimated_cost_items,
                      total_estimated_cost, justification, target_beneficiaries, target_outputs, possible_risks,
                      expected_private_partnerships, accepts_volunteers, volunteer_approval_mode,
                      period_start, period_end, stated_duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             $statement->execute([
-                $user['id'], $brief['title'], $brief['summary'], $brief['proponents'],
+                $user['id'], $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
                 $brief['activity_components'], $brief['estimated_cost_items'], $brief['total_estimated_cost'],
                 $brief['justification'], $brief['target_beneficiaries'], $brief['target_outputs'],
                 $brief['possible_risks'], $brief['expected_private_partnerships'],
@@ -1513,6 +1850,7 @@ final class ApiController
                 'reviewNotes' => $proposal['review_notes'],
                 'title' => $proposal['title'],
                 'summary' => $proposal['summary'],
+                'venue' => $proposal['venue'] ?? '',
                 'acceptsVolunteers' => (bool) $proposal['accepts_volunteers'],
                 'volunteerApprovalMode' => $proposal['volunteer_approval_mode'],
                 'periodStart' => $proposal['period_start'],
@@ -1555,14 +1893,14 @@ final class ApiController
             }
             $statement = $this->db->prepare(
             'UPDATE proposals
-             SET title = ?, summary = ?, proponents = ?, activity_components = ?, estimated_cost_items = ?,
+             SET title = ?, summary = ?, venue = ?, proponents = ?, activity_components = ?, estimated_cost_items = ?,
                  total_estimated_cost = ?, justification = ?, target_beneficiaries = ?, target_outputs = ?,
                  possible_risks = ?, expected_private_partnerships = ?, accepts_volunteers = ?,
                  volunteer_approval_mode = ?, period_start = ?, period_end = ?, stated_duration = ?
              WHERE id = ? AND owner_user_id = ? AND status = ?'
             );
             $statement->execute([
-                $brief['title'], $brief['summary'], $brief['proponents'], $brief['activity_components'],
+                $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'], $brief['activity_components'],
                 $brief['estimated_cost_items'], $brief['total_estimated_cost'], $brief['justification'],
                 $brief['target_beneficiaries'], $brief['target_outputs'], $brief['possible_risks'],
                 $brief['expected_private_partnerships'], $brief['accepts_volunteers'],
@@ -1588,6 +1926,17 @@ final class ApiController
                 ? 'Revision changes saved. Submit the proposal when it is ready for review.'
                 : 'Draft proposal updated.',
         ]);
+    }
+
+    private function logoDataUri(): string
+    {
+        $logoPath = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR .
+            'assets' . DIRECTORY_SEPARATOR . 'img' . DIRECTORY_SEPARATOR . 'ucc-logo-report.jpg';
+        $logo = is_file($logoPath) ? file_get_contents($logoPath) : false;
+        if ($logo === false) {
+            throw new RuntimeException('The UCC-CES logo asset is unavailable for PDF generation.', 500);
+        }
+        return 'data:image/jpeg;base64,' . base64_encode($logo);
     }
 
     private function downloadProjectBrief(int $proposalId): never
@@ -1626,6 +1975,7 @@ final class ApiController
         $activities = $this->decodeJsonList($project['activity_components'] ?? null);
         $budgetItems = $this->decodeJsonList($project['estimated_cost_items'] ?? null);
         $dateRange = trim((string) ($project['period_start'] ?? '') . ' to ' . (string) ($project['period_end'] ?? ''), ' to');
+        $logoDataUri = $this->logoDataUri();
         $html = '<!doctype html><html><head><meta charset="utf-8"><style>
             @page { margin: 28px 34px; }
             body { font-family: DejaVu Sans, sans-serif; color: #24372c; font-size: 10px; line-height: 1.45; }
@@ -1638,11 +1988,15 @@ final class ApiController
             th { background: #f2f7f3; font-size: 9px; }
             .total { text-align: right; font-size: 12px; font-weight: bold; }
             .empty { color: #718077; font-style: italic; }
+            .brand { width: 100%; border: 0; margin: 0 0 8px; }
+            .brand td { border: 0; padding: 0 8px 0 0; vertical-align: middle; }
+            .brand img { width: 38px; height: 46px; }
             </style></head><body>';
-        $html .= '<h1>UCC · Community Extension Services</h1><div class="sub">PROJECT BRIEF · Prepared by ' . $escape($preparedBy) . '</div>';
+        $html .= '<table class="brand"><tr><td style="width:48px"><img src="' . $logoDataUri . '" alt="UCC logo"></td><td><h1>UCC · Community Extension Services</h1><div class="sub">PROJECT BRIEF · Prepared by ' . $escape($preparedBy) . '</div></td></tr></table>';
         $html .= '<h2>1. General Project Information</h2><table><tbody>';
         $html .= '<tr><th>Project Name</th><td>' . $escape($project['title']) . '</td></tr>';
         $html .= '<tr><th>Brief Description</th><td>' . nl2br($escape($project['summary'])) . '</td></tr>';
+        $html .= '<tr><th>Project Venue / Location</th><td>' . $escape($project['venue'] ?? 'Not specified') . '</td></tr>';
         $html .= '<tr><th>Co-Proponents / Partner Entities</th><td>' . nl2br($escape(implode("\n", $proponents))) . '</td></tr>';
         $html .= '<tr><th>Program Term / Duration</th><td>' . $escape($dateRange ?: 'Not specified') . ' · ' . $escape($project['stated_duration'] ?? '') . '</td></tr>';
         $html .= '</tbody></table><h2>2. Activity Components &amp; Justification</h2>';
@@ -1833,8 +2187,8 @@ final class ApiController
         $user = Http::requireRole('partner');
         $this->assertProposalAccess($proposalId, $user, true);
         $readiness = $this->proposalDocumentReadiness($proposalId);
-        if (in_array(false, $readiness, true)) {
-            throw new RuntimeException('Submission requires a signed proposal letter, project brief, and at least one signed MOA or MOU.');
+        if (!$readiness['signed_proposal_letter'] || !$readiness['project_brief']) {
+            throw new RuntimeException('Submission requires a signed proposal letter and project brief.');
         }
         $update = $this->db->prepare("UPDATE proposals SET status = 'submitted', submitted_at = NOW() WHERE id = ? AND status IN ('draft', 'revision')");
         $update->execute([$proposalId]);
@@ -1855,25 +2209,8 @@ final class ApiController
         if (!in_array($status, $allowed, true)) {
             throw new RuntimeException('Choose a valid proposal review status.');
         }
-        $current = $this->proposal($proposalId);
-        $transitions = [
-            'submitted' => ['under_review', 'revision', 'rejected'],
-            'under_review' => ['revision', 'approved', 'rejected'],
-            'revision' => [],
-            'approved' => ['active'],
-            'active' => [],
-            'rejected' => [],
-            'draft' => [],
-        ];
-        if (!in_array($status, $transitions[$current['status']] ?? [], true)) {
-            throw new RuntimeException('That proposal status transition is not allowed.');
-        }
-        if ($status === 'active') {
-            $signedAgreement = $this->db->prepare("SELECT COUNT(*) FROM documents WHERE proposal_id = ? AND document_type IN ('moa', 'mou') AND is_signed = 1");
-            $signedAgreement->execute([$proposalId]);
-            if ((int) $signedAgreement->fetchColumn() < 1) {
-                throw new RuntimeException('An approved proposal needs an attached signed MOA or MOU before activation.');
-            }
+        if ($status === 'active' && ($data['permanentConfirmation'] ?? false) !== true) {
+            throw new RuntimeException('Confirm that activation is permanent before activating this proposal.', 422);
         }
         $notesValue = $data['notes'] ?? '';
         if (!is_string($notesValue)) {
@@ -1886,11 +2223,142 @@ final class ApiController
         if (mb_strlen($notes, 'UTF-8') > 2000) {
             throw new RuntimeException('Review notes cannot exceed 2,000 characters.');
         }
-        $update = $this->db->prepare('UPDATE proposals SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW() WHERE id = ?');
-        $update->execute([$status, $notes ?: null, $admin['id'], $proposalId]);
-        $this->notifyUser((int) $current['owner_user_id'], 'Proposal ' . str_replace('_', ' ', $status), $notes ?: 'Your proposal status is now ' . str_replace('_', ' ', $status) . '.');
-        $this->logActivity('proposal.status_changed', 'proposal', $proposalId, ['from' => $current['status'], 'to' => $status]);
-        Http::json(['status' => $status]);
+        $this->db->beginTransaction();
+        try {
+            $statement = $this->db->prepare(
+                'SELECT id, owner_user_id, title, status FROM proposals WHERE id = ? FOR UPDATE'
+            );
+            $statement->execute([$proposalId]);
+            $current = $statement->fetch();
+            if (!$current) {
+                throw new RuntimeException('Proposal was not found.', 404);
+            }
+            $transitions = [
+                'submitted' => ['under_review', 'revision', 'approved', 'rejected'],
+                'under_review' => ['revision', 'approved', 'rejected'],
+                'revision' => [],
+                'approved' => ['active'],
+                'active' => [],
+                'rejected' => [],
+                'draft' => [],
+            ];
+            if (!in_array($status, $transitions[$current['status']] ?? [], true)) {
+                throw new RuntimeException('That proposal status transition is not allowed.');
+            }
+
+            $update = $this->db->prepare(
+                'UPDATE proposals
+                 SET status = ?, review_notes = ?, reviewed_by = ?, reviewed_at = NOW()
+                 WHERE id = ?'
+            );
+            $update->execute([$status, $notes ?: null, $admin['id'], $proposalId]);
+            $eventId = null;
+            if ($status === 'active') {
+                $eventId = $this->synchronizeProposalEvent($proposalId);
+            }
+            $this->logActivity('proposal.status_changed', 'proposal', $proposalId, [
+                'from' => $current['status'],
+                'to' => $status,
+                'event_id' => $eventId,
+            ]);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+
+        if ($status === 'active') {
+            $message = sprintf(
+                'The proposal "%s" was activated and added to Events & Attendance%s.',
+                $current['title'],
+                $eventId ? ' as event #' . $eventId : ''
+            );
+            $this->notifyUser((int) $current['owner_user_id'], 'Proposal activated', $message);
+            $this->notifyAdmins('Proposal activated and queued', $message);
+        } else {
+            $this->notifyUser(
+                (int) $current['owner_user_id'],
+                'Proposal ' . str_replace('_', ' ', $status),
+                $notes ?: 'Your proposal status is now ' . str_replace('_', ' ', $status) . '.'
+            );
+        }
+        Http::json(['status' => $status, 'eventId' => $eventId]);
+    }
+
+    private function proposalActivationSummary(int $proposalId): never
+    {
+        Http::requireRole('admin');
+        $proposal = $this->db->prepare(
+            'SELECT id, title, summary, proponents, activity_components, estimated_cost_items,
+                    venue, total_estimated_cost, justification, target_beneficiaries, target_outputs,
+                    possible_risks, expected_private_partnerships, accepts_volunteers,
+                    volunteer_approval_mode, period_start, period_end, stated_duration, status
+             FROM proposals WHERE id = ?'
+        );
+        $proposal->execute([$proposalId]);
+        $project = $proposal->fetch();
+        if (!$project) {
+            throw new RuntimeException('Proposal was not found.', 404);
+        }
+        if ($project['status'] !== 'approved') {
+            throw new RuntimeException('Only an approved proposal can be activated.', 409);
+        }
+
+        $owner = $this->db->prepare(
+            'SELECT organization_name, organization_type
+             FROM partners WHERE user_id = (SELECT owner_user_id FROM proposals WHERE id = ?)'
+        );
+        $owner->execute([$proposalId]);
+        $collaborators = $this->db->prepare(
+            'SELECT partner.organization_name, partner.organization_type,
+                    proposal_partner.relationship, proposal_partner.invitation_status
+             FROM proposal_partners proposal_partner
+             JOIN partners partner ON partner.user_id = proposal_partner.partner_user_id
+             WHERE proposal_partner.proposal_id = ?
+             ORDER BY proposal_partner.relationship, partner.organization_name'
+        );
+        $collaborators->execute([$proposalId]);
+        $classifications = $this->db->prepare(
+            'SELECT classification FROM proposal_classifications WHERE proposal_id = ? ORDER BY classification'
+        );
+        $classifications->execute([$proposalId]);
+        $categories = $this->db->prepare(
+            'SELECT category.name
+             FROM proposal_categories proposal_category
+             JOIN categories category ON category.id = proposal_category.category_id
+             WHERE proposal_category.proposal_id = ?
+             ORDER BY category.name'
+        );
+        $categories->execute([$proposalId]);
+
+        Http::json([
+            'project' => [
+                'id' => (int) $project['id'],
+                'title' => $project['title'],
+                'summary' => $project['summary'],
+                'venue' => $project['venue'] ?? null,
+                'proponents' => $this->decodeJsonList($project['proponents']),
+                'activityComponents' => $this->decodeJsonList($project['activity_components']),
+                'estimatedCostItems' => $this->decodeJsonList($project['estimated_cost_items']),
+                'totalEstimatedCost' => (float) $project['total_estimated_cost'],
+                'justification' => $project['justification'],
+                'targetBeneficiaries' => $project['target_beneficiaries'],
+                'targetOutputs' => $project['target_outputs'],
+                'possibleRisks' => $project['possible_risks'],
+                'expectedPrivatePartnerships' => $project['expected_private_partnerships'],
+                'acceptsVolunteers' => (bool) $project['accepts_volunteers'],
+                'volunteerApprovalMode' => $project['volunteer_approval_mode'],
+                'periodStart' => $project['period_start'],
+                'periodEnd' => $project['period_end'],
+                'duration' => $project['stated_duration'],
+            ],
+            'primaryPartner' => $owner->fetch() ?: null,
+            'collaborators' => $collaborators->fetchAll(),
+            'classifications' => $classifications->fetchAll(PDO::FETCH_COLUMN),
+            'categories' => $categories->fetchAll(PDO::FETCH_COLUMN),
+        ]);
     }
 
     private function listBudgetItems(int $proposalId): never
@@ -2000,8 +2468,8 @@ final class ApiController
         $data = Http::body();
         $partnerId = Http::positiveId((string) ($data['partnerId'] ?? ''));
         $proposal = $this->proposal($proposalId);
-        if (!in_array($proposal['status'], ['submitted', 'under_review', 'revision', 'approved', 'active'], true)) {
-            throw new RuntimeException('Collaborators can be invited after a proposal has been submitted for review.');
+        if ($proposal['status'] !== 'approved') {
+            throw new RuntimeException('Partners can only be invited to an approved proposal.');
         }
         if ((int) $proposal['owner_user_id'] === $partnerId) {
             throw new RuntimeException('The primary proposing organization is already part of this project.');
@@ -2037,6 +2505,86 @@ final class ApiController
              ORDER BY p.organization_name"
         );
         Http::json(['partners' => $partners->fetchAll()]);
+    }
+
+    private function createPendingPartnerAccount(): never
+    {
+        $creator = Http::requireRole('partner');
+        $data = Http::body();
+        $firstName = trim((string) ($data['firstName'] ?? ''));
+        $lastName = trim((string) ($data['lastName'] ?? ''));
+        $email = strtolower(trim((string) ($data['email'] ?? '')));
+        $contact = trim((string) ($data['contactNumber'] ?? ''));
+        $organizationName = trim((string) ($data['organizationName'] ?? ''));
+        $designation = trim((string) ($data['officialDesignation'] ?? ''));
+        $category = (string) ($data['organizationCategory'] ?? '');
+        $password = $data['password'] ?? null;
+        $confirmation = $data['confirmation'] ?? null;
+        $categories = [
+            'UCC Department / Academic Unit' => 'UCC Department',
+            'Local Government Unit (LGU / Barangay)' => 'LGU',
+            'Government Agency (e.g., MMDA, DSWD)' => 'NGA',
+            'NGO / Non-Profit Organization' => 'NGO',
+            'Private Sector / Corporate Partner' => 'Private Sector',
+        ];
+        if ($firstName === '' || mb_strlen($firstName, 'UTF-8') > 100 ||
+            $lastName === '' || mb_strlen($lastName, 'UTF-8') > 100 ||
+            !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 190 ||
+            $contact === '' || strlen($contact) > 40 ||
+            $organizationName === '' || mb_strlen($organizationName, 'UTF-8') > 190 ||
+            !isset($categories[$category]) ||
+            $designation === '' || mb_strlen($designation, 'UTF-8') > 190) {
+            throw new RuntimeException('Enter valid representative, contact, and organization details.');
+        }
+        if (!is_string($password) || strlen($password) < 12 || strlen($password) > 200 ||
+            !is_string($confirmation) || !hash_equals($password, $confirmation)) {
+            throw new RuntimeException('Use a password of at least 12 characters and confirm it correctly.');
+        }
+        if ($this->findUserByEmail($email)) {
+            throw new RuntimeException('An account with this email already exists.', 409);
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $insertUser = $this->db->prepare(
+                "INSERT INTO users (email, password_hash, role, account_status, first_name, last_name, contact_number)
+                 VALUES (?, ?, 'partner', 'pending', ?, ?, ?)"
+            );
+            $insertUser->execute([
+                $email,
+                password_hash($password, PASSWORD_DEFAULT),
+                $firstName,
+                $lastName,
+                $contact,
+            ]);
+            $partnerId = (int) $this->db->lastInsertId();
+            $insertPartner = $this->db->prepare(
+                'INSERT INTO partners
+                    (user_id, organization_name, organization_type, organization_category, official_designation)
+                 VALUES (?, ?, ?, ?, ?)'
+            );
+            $insertPartner->execute([$partnerId, $organizationName, $categories[$category], $category, $designation]);
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            if ($exception instanceof \PDOException && $exception->getCode() === '23000') {
+                throw new RuntimeException('An account with this email already exists.', 409, $exception);
+            }
+            throw $exception;
+        }
+        $this->notifyAdmins(
+            'Partner account awaiting approval',
+            sprintf('%s %s created a partner account for %s; administrator approval is required before activation.', $firstName, $lastName, $organizationName)
+        );
+        $this->logActivity('partner.account_created_pending', 'user', $partnerId, ['created_by' => (int) $creator['id']]);
+        Http::json([
+            'id' => $partnerId,
+            'organization_name' => $organizationName,
+            'status' => 'pending',
+            'message' => 'Partner account created as Pending Approval. An Admin must approve it before activation.',
+        ], 201);
     }
 
     private function createCollaboratorAccount(int $proposalId): never
@@ -2084,8 +2632,8 @@ final class ApiController
         $accountStatus = $user['role'] === 'admin' ? 'approved' : 'pending';
         $organizationType = $categories[$category];
         $proposal = $this->proposal($proposalId);
-        if (!in_array($proposal['status'], ['submitted', 'under_review', 'revision', 'approved', 'active'], true)) {
-            throw new RuntimeException('Collaborators can be invited after a proposal has been submitted for review.');
+        if ($proposal['status'] !== 'approved') {
+            throw new RuntimeException('Partner accounts can only be invited to an approved proposal.');
         }
         $this->db->beginTransaction();
         try {
@@ -2192,8 +2740,8 @@ final class ApiController
         $data = Http::body();
         $proposalId = Http::positiveId((string) ($data['proposalId'] ?? ''));
         $proposal = $this->proposal($proposalId);
-        if (!in_array($proposal['status'], ['approved', 'active'], true)) {
-            throw new RuntimeException('Events can only be configured for approved or active proposals.');
+        if ($proposal['status'] !== 'active') {
+            throw new RuntimeException('A proposal must be activated before its official event can be configured.', 409);
         }
         $this->assertProposalAccess($proposalId, $user, false);
         $title = trim((string) ($data['title'] ?? ''));
@@ -2272,7 +2820,7 @@ final class ApiController
     {
         $user = Http::user();
         $sql =
-            "SELECT e.id, e.proposal_id, e.organizer_user_id, e.title, e.description, e.capacity,
+            "SELECT e.id, e.proposal_id, e.organizer_user_id, e.title, e.description, e.venue, e.capacity,
                     e.applications_open_at, e.applications_close_at, p.status AS proposal_status, p.title AS project_title,
                     (SELECT MIN(ed.event_date) FROM event_dates ed
                      WHERE ed.event_id = e.id AND ed.event_date >= CURDATE()) AS next_event_date,
@@ -2284,9 +2832,9 @@ final class ApiController
                     (SELECT MAX(a.end_time)
                      FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
                      WHERE ed.event_id = e.id) AS end_time,
-                    (SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
+                    COALESCE((SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
                      FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
-                     WHERE ed.event_id = e.id) AS venues,
+                     WHERE ed.event_id = e.id), e.venue) AS venues,
                     CASE
                         WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date = CURDATE()) THEN 'ongoing'
                         WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date > CURDATE()) THEN 'upcoming'
@@ -2322,6 +2870,7 @@ final class ApiController
                            WHERE capacity_check.event_id = e.id AND capacity_check.status = 'approved') < e.capacity";
         } elseif ($user['role'] === 'partner') {
             $sql .= ' WHERE p.status IN (\'approved\', \'active\')
+                      AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) >= CURDATE()
                       AND (e.organizer_user_id = ?
                            OR EXISTS (SELECT 1 FROM event_partners ep
                                       WHERE ep.event_id = e.id AND ep.partner_user_id = ?)
@@ -2334,13 +2883,13 @@ final class ApiController
             $params[] = (int) $user['id'];
             $params[] = (int) $user['id'];
         }
-        $sql .= ' ORDER BY next_event_date, e.created_at DESC LIMIT 250';
+        $sql .= ' ORDER BY next_event_date, e.created_at DESC';
         $statement = $this->db->prepare($sql);
         $statement->execute($params);
         $events = $statement->fetchAll();
         if ($user['role'] === 'partner') {
             $projects = $this->db->prepare(
-                "SELECT p.id AS proposal_id, p.title, p.status AS proposal_status,
+                "SELECT p.id AS proposal_id, p.title, p.venue, p.status AS proposal_status,
                         p.period_start AS date_start, p.period_end AS date_end,
                         (SELECT GROUP_CONCAT(DISTINCT partner.organization_name
                                              ORDER BY partner.organization_name SEPARATOR ', ')
@@ -2351,8 +2900,9 @@ final class ApiController
                                 WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
                             )) AS partner_name
                  FROM proposals p
-                 WHERE p.status IN ('approved', 'active')
+                 WHERE p.status = 'active'
                    AND p.period_start IS NOT NULL AND p.period_end IS NOT NULL
+                   AND p.period_end >= CURDATE()
                    AND p.period_end >= p.period_start
                    AND (p.owner_user_id = ? OR EXISTS (
                         SELECT 1 FROM proposal_partners pp
@@ -2374,7 +2924,7 @@ final class ApiController
                     : null;
                 $project['start_time'] = null;
                 $project['end_time'] = null;
-                $project['venues'] = null;
+                $project['venues'] = $project['venue'];
                 $project['event_status'] = $project['date_start'] > $today
                     ? 'upcoming'
                     : ($project['date_end'] < $today ? 'completed' : 'ongoing');
@@ -2397,7 +2947,7 @@ final class ApiController
             throw new RuntimeException('Event details are available to administrators and event partners only.', 403);
         }
         $statement = $this->db->prepare(
-            "SELECT e.id, e.proposal_id, e.title, e.description, e.capacity,
+            "SELECT e.id, e.proposal_id, e.title, e.description, e.venue, e.capacity,
                     e.applications_open_at, e.applications_close_at,
                     p.title AS project_title, p.status AS proposal_status,
                     p.period_start, p.period_end,
@@ -2419,7 +2969,8 @@ final class ApiController
                      WHERE ed.event_id = e.id) AS attendance_headcount
              FROM events e
              JOIN proposals p ON p.id = e.proposal_id
-             WHERE e.id = ? AND p.status IN ('approved', 'active')"
+             WHERE e.id = ? AND p.status IN ('approved', 'active')
+               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) >= CURDATE()"
         );
         $statement->execute([$eventId]);
         $event = $statement->fetch();
@@ -2432,7 +2983,8 @@ final class ApiController
             "SELECT ed.id, ed.event_date,
                     MIN(a.start_time) AS start_time,
                     MAX(a.end_time) AS end_time,
-                    GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ') AS venues,
+                    COALESCE(GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', '),
+                             (SELECT venue FROM events WHERE id = ed.event_id)) AS venues,
                     (SELECT COUNT(*) FROM attendance at
                      WHERE at.event_date_id = ed.id AND at.status = 'present') AS present_count
              FROM event_dates ed
@@ -2458,6 +3010,13 @@ final class ApiController
     {
         $user = Http::requireRole('admin', 'partner');
         $this->assertEventOrganizer($eventId, $user);
+        $proposalStatus = $this->db->prepare(
+            'SELECT p.status FROM events e JOIN proposals p ON p.id = e.proposal_id WHERE e.id = ?'
+        );
+        $proposalStatus->execute([$eventId]);
+        if (in_array($proposalStatus->fetchColumn(), ['approved', 'active'], true)) {
+            throw new RuntimeException('Approved and active event details are locked and cannot be edited.', 409);
+        }
         $data = Http::body();
         $title = trim((string) ($data['title'] ?? ''));
         $descriptionValue = $data['description'] ?? '';
@@ -2489,7 +3048,7 @@ final class ApiController
     {
         Http::requireRole('admin');
         $events = $this->db->query(
-            "SELECT e.id, e.proposal_id, e.title, e.description, e.capacity, p.title AS project_title,
+            "SELECT e.id, e.proposal_id, e.title, e.description, e.venue, e.capacity, p.title AS project_title,
                     p.status AS proposal_status,
                     (SELECT MIN(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS date_start,
                     (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS date_end,
@@ -2499,9 +3058,9 @@ final class ApiController
                     (SELECT MAX(a.end_time)
                      FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
                      WHERE ed.event_id = e.id) AS end_time,
-                    (SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
+                    COALESCE((SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
                      FROM event_dates ed JOIN activities a ON a.event_date_id = ed.id
-                     WHERE ed.event_id = e.id) AS venues,
+                     WHERE ed.event_id = e.id), e.venue) AS venues,
                     (SELECT MIN(ed.event_date) FROM event_dates ed
                      WHERE ed.event_id = e.id AND ed.event_date >= CURDATE()) AS next_event_date,
                     CASE
@@ -2531,11 +3090,12 @@ final class ApiController
              FROM events e
              JOIN proposals p ON p.id = e.proposal_id
              WHERE p.status IN ('approved', 'active')
+               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) >= CURDATE()
              ORDER BY next_event_date, e.title"
         )->fetchAll();
 
         $projectsWithoutEvents = $this->db->query(
-            "SELECT p.id AS proposal_id, p.title, p.status AS proposal_status,
+            "SELECT p.id AS proposal_id, p.title, p.venue, p.status AS proposal_status,
                     p.period_start AS date_start, p.period_end AS date_end,
                     (SELECT GROUP_CONCAT(DISTINCT partner.organization_name ORDER BY partner.organization_name SEPARATOR ', ')
                      FROM partners partner
@@ -2546,8 +3106,9 @@ final class ApiController
                             WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
                         )) AS partner_name
              FROM proposals p
-             WHERE p.status IN ('approved', 'active')
+             WHERE p.status = 'active'
                AND p.period_start IS NOT NULL AND p.period_end IS NOT NULL
+               AND p.period_end >= CURDATE()
                AND p.period_end >= p.period_start
                AND NOT EXISTS (SELECT 1 FROM events e WHERE e.proposal_id = p.id)"
         )->fetchAll();
@@ -2559,7 +3120,7 @@ final class ApiController
             $project['project_title'] = $project['title'];
             $project['start_time'] = null;
             $project['end_time'] = null;
-            $project['venues'] = null;
+            $project['venues'] = $project['venue'];
             $project['next_event_date'] = $project['date_end'] >= $today
                 ? max($project['date_start'], $today)
                 : null;
@@ -2585,7 +3146,7 @@ final class ApiController
             throw new RuntimeException('Calendar month is invalid.');
         }
         $calendar = $this->db->prepare(
-            "SELECT e.id, e.proposal_id, ed.id AS event_date_id, e.title, p.title AS project_title, ed.event_date,
+            "SELECT e.id, e.proposal_id, ed.id AS event_date_id, e.title, e.venue, p.title AS project_title, ed.event_date,
                     CASE
                         WHEN ed.event_date = CURDATE() THEN 'ongoing'
                         WHEN ed.event_date > CURDATE() THEN 'upcoming'
@@ -2593,8 +3154,8 @@ final class ApiController
                     END AS event_status,
                     (SELECT MIN(a.start_time) FROM activities a WHERE a.event_date_id = ed.id) AS start_time,
                     (SELECT MAX(a.end_time) FROM activities a WHERE a.event_date_id = ed.id) AS end_time,
-                    (SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
-                     FROM activities a WHERE a.event_date_id = ed.id) AS venues,
+                    COALESCE((SELECT GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', ')
+                     FROM activities a WHERE a.event_date_id = ed.id), e.venue) AS venues,
                     (SELECT COUNT(*) FROM event_applications ea
                      WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
                     (SELECT COUNT(*) FROM attendance a
@@ -2621,7 +3182,7 @@ final class ApiController
         $calendarRows = $calendar->fetchAll();
         $today = date('Y-m-d');
         $projectCalendar = $this->db->prepare(
-            "SELECT p.id AS proposal_id, p.title, p.status AS proposal_status,
+            "SELECT p.id AS proposal_id, p.title, p.venue, p.status AS proposal_status,
                     p.period_start AS date_start, p.period_end AS date_end,
                     (SELECT GROUP_CONCAT(DISTINCT partner.organization_name ORDER BY partner.organization_name SEPARATOR ', ')
                      FROM partners partner
@@ -2632,7 +3193,7 @@ final class ApiController
                             WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
                         )) AS partner_name
              FROM proposals p
-             WHERE p.status IN ('approved', 'active')
+             WHERE p.status = 'active'
                AND p.period_start IS NOT NULL AND p.period_end IS NOT NULL
                AND p.period_start <= ? AND p.period_end >= ?
                AND p.period_end >= p.period_start
@@ -2668,7 +3229,7 @@ final class ApiController
                     'event_status' => $projectStatus,
                     'start_time' => null,
                     'end_time' => null,
-                    'venues' => null,
+                    'venues' => $project['venue'],
                     'registered_volunteers' => 0,
                     'attendance_headcount' => 0,
                     'partner_name' => $project['partner_name'],
@@ -2690,26 +3251,30 @@ final class ApiController
     private function synchronizeProposalEvent(int $proposalId): int
     {
         $secret = (string) ($this->config['app_key'] ?? '');
-
-        $this->db->beginTransaction();
+        $ownsTransaction = !$this->db->inTransaction();
+        if ($ownsTransaction) {
+            $this->db->beginTransaction();
+        }
         try {
             $proposalStatement = $this->db->prepare(
-                'SELECT id, owner_user_id, title, summary, period_start, period_end, status
+                'SELECT id, owner_user_id, title, summary, venue, period_start, period_end, status
                  FROM proposals WHERE id = ? FOR UPDATE'
             );
             $proposalStatement->execute([$proposalId]);
             $proposal = $proposalStatement->fetch();
-            if (!$proposal || !in_array($proposal['status'], ['approved', 'active'], true) ||
+            if (!$proposal || $proposal['status'] !== 'active' ||
                 !$proposal['period_start'] || !$proposal['period_end'] ||
                 $proposal['period_end'] < $proposal['period_start']) {
-                throw new RuntimeException('This approved proposal does not have a valid event date range.', 422);
+                throw new RuntimeException('This activated proposal does not have a valid event date range.', 422);
             }
 
             $existing = $this->db->prepare('SELECT id FROM events WHERE proposal_id = ? ORDER BY id LIMIT 1');
             $existing->execute([$proposalId]);
             $existingEventId = $existing->fetchColumn();
             if ($existingEventId) {
-                $this->db->commit();
+                if ($ownsTransaction) {
+                    $this->db->commit();
+                }
                 return (int) $existingEventId;
             }
 
@@ -2720,14 +3285,15 @@ final class ApiController
             }
 
             $eventInsert = $this->db->prepare(
-                'INSERT INTO events (proposal_id, organizer_user_id, title, description, capacity)
-                 VALUES (?, ?, ?, ?, ?)'
+                'INSERT INTO events (proposal_id, organizer_user_id, title, description, venue, capacity)
+                 VALUES (?, ?, ?, ?, ?, ?)'
             );
             $eventInsert->execute([
                 $proposalId,
                 (int) $proposal['owner_user_id'],
                 $proposal['title'],
                 $proposal['summary'] ?: null,
+                $proposal['venue'] ?: null,
                 100000,
             ]);
             $eventId = (int) $this->db->lastInsertId();
@@ -2757,10 +3323,12 @@ final class ApiController
                     $tokenUpdate->execute([hash('sha256', $token), $eventDateId]);
                 }
             }
-            $this->db->commit();
+            if ($ownsTransaction) {
+                $this->db->commit();
+            }
             return $eventId;
         } catch (Throwable $exception) {
-            if ($this->db->inTransaction()) {
+            if ($ownsTransaction && $this->db->inTransaction()) {
                 $this->db->rollBack();
             }
             throw $exception;
@@ -2803,6 +3371,7 @@ final class ApiController
                    LEFT JOIN activities a ON a.event_date_id = ed.id";
         $partnerEvents = $this->db->prepare(
             $select . " WHERE p.status IN ('approved', 'active')
+                        AND ed.event_date >= CURDATE()
                         AND ed.event_date >= ? AND ed.event_date < ?
                         AND $partnerSql
                         GROUP BY e.id, e.title, p.title, ed.id, ed.event_date
@@ -2818,6 +3387,7 @@ final class ApiController
                               WHERE ucc_partner.user_id = e.organizer_user_id
                                 AND ucc_partner.organization_type IN ('UCC Department', 'College')
                           ))
+                        AND ed.event_date >= CURDATE()
                         AND ed.event_date >= ? AND ed.event_date < ?
                         AND NOT $partnerSql
                         GROUP BY e.id, e.title, p.title, ed.id, ed.event_date
@@ -2826,7 +3396,7 @@ final class ApiController
         $publicEvents->execute([$from, $to, $partnerId, $partnerId, $partnerId, $partnerId]);
 
         $partnerProjects = $this->db->prepare(
-            "SELECT p.id AS proposal_id, p.title, p.status AS proposal_status,
+            "SELECT p.id AS proposal_id, p.title, p.venue, p.status AS proposal_status,
                     p.period_start, p.period_end,
                     (SELECT GROUP_CONCAT(DISTINCT partner.organization_name
                                          ORDER BY partner.organization_name SEPARATOR ', ')
@@ -2837,8 +3407,9 @@ final class ApiController
                             WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
                         )) AS partner_name
              FROM proposals p
-             WHERE p.status IN ('approved', 'active')
+             WHERE p.status = 'active'
                AND p.period_start IS NOT NULL AND p.period_end IS NOT NULL
+               AND p.period_end >= CURDATE()
                AND p.period_start <= ? AND p.period_end >= ?
                AND p.period_end >= p.period_start
                AND (p.owner_user_id = ? OR EXISTS (
@@ -2878,7 +3449,7 @@ final class ApiController
                     'project_title' => $project['title'],
                     'event_date' => $eventDate,
                     'event_status' => $projectStatus,
-                    'venue' => null,
+                    'venue' => $project['venue'],
                     'partner_name' => $project['partner_name'],
                     'is_project_proposal' => true,
                 ];
@@ -2915,7 +3486,7 @@ final class ApiController
                             ELSE 'Other'
                         END) AS affiliation,
                     ea.status AS application_status, a.status AS attendance_status,
-                    a.scanned_at, a.note
+                    a.scanned_at, a.checked_out_at, a.verification_status, a.note
              FROM events e
              JOIN event_dates ed ON ed.event_id = e.id
              LEFT JOIN event_applications ea ON ea.event_id = e.id
@@ -2950,7 +3521,7 @@ final class ApiController
         fwrite($output, "\xEF\xBB\xBF");
         fputcsv($output, [
             'Record type', 'Event', 'Event date', 'Attendee name', 'Email', 'Affiliation',
-            'Application status', 'Attendance status', 'Scanned at', 'Note',
+            'Application status', 'Attendance status', 'Checked in at', 'Checked out at', 'Verification status', 'Note',
             'Participant group', 'Participant count',
         ]);
         foreach ($rows as $row) {
@@ -2964,6 +3535,8 @@ final class ApiController
                 $row['application_status'] ?? '',
                 $row['attendance_status'] ?? '',
                 $row['scanned_at'] ?? '',
+                $row['checked_out_at'] ?? '',
+                $row['verification_status'] ?? '',
                 $row['note'] ?? '',
                 '',
                 '',
@@ -2974,6 +3547,8 @@ final class ApiController
                 'Community participant count',
                 $row['event_title'],
                 $row['event_date'],
+                '',
+                '',
                 '',
                 '',
                 '',
@@ -3146,7 +3721,8 @@ final class ApiController
                             WHEN 'civilian' THEN 'Community Resident'
                             ELSE 'Other'
                         END) AS affiliation,
-                    a.status AS attendance_status, a.note AS attendance_note, a.scanned_at
+                    a.status AS attendance_status, a.note AS attendance_note, a.scanned_at,
+                    a.checked_out_at, a.verification_status
              FROM event_applications ea
              JOIN users u ON u.id = ea.volunteer_user_id
              LEFT JOIN volunteer_profiles vp ON vp.user_id = ea.volunteer_user_id
@@ -3395,6 +3971,10 @@ final class ApiController
         $user = Http::requireRole('volunteer');
         $this->requireApprovedVolunteer((int) $user['id']);
         $data = Http::body();
+        $action = (string) ($data['action'] ?? 'check_in');
+        if (!in_array($action, ['check_in', 'check_out'], true)) {
+            throw new RuntimeException('Attendance action must be check_in or check_out.');
+        }
         $eventDateId = Http::positiveId((string) ($data['eventDateId'] ?? ''));
         $expectedEventId = isset($data['eventId'])
             ? Http::positiveId((string) $data['eventId'])
@@ -3436,14 +4016,66 @@ final class ApiController
         if (!$applicationId) {
             throw new RuntimeException('An approved application is required to record attendance.', 403);
         }
-        $insert = $this->db->prepare(
-            "INSERT INTO attendance (application_id, event_date_id, status, scanned_at)
-             VALUES (?, ?, 'present', NOW())
-             ON DUPLICATE KEY UPDATE status = 'present', scanned_at = NOW(), marked_by = NULL, note = NULL"
-        );
-        $insert->execute([(int) $applicationId, $eventDateId]);
-        $this->logActivity('attendance.checked_in', 'event_date', $eventDateId, ['event_id' => (int) $date['event_id']]);
-        Http::json(['message' => 'Attendance recorded.', 'status' => 'present', 'eventDateId' => $eventDateId]);
+        $this->db->beginTransaction();
+        try {
+            $attendanceStatement = $this->db->prepare(
+                'SELECT id, status, scanned_at, checked_out_at, verification_status
+                 FROM attendance WHERE application_id = ? AND event_date_id = ? FOR UPDATE'
+            );
+            $attendanceStatement->execute([(int) $applicationId, $eventDateId]);
+            $attendance = $attendanceStatement->fetch();
+
+            if ($action === 'check_in') {
+                if ($attendance && $attendance['checked_out_at'] !== null) {
+                    throw new RuntimeException('You have already checked out for this event date.');
+                }
+                if (!$attendance || $attendance['status'] !== 'present' || $attendance['scanned_at'] === null) {
+                    $insert = $this->db->prepare(
+                        "INSERT INTO attendance
+                            (application_id, event_date_id, status, scanned_at, checked_out_at, verification_status)
+                         VALUES (?, ?, 'present', NOW(), NULL, 'verified')
+                         ON DUPLICATE KEY UPDATE status = 'present', scanned_at = NOW(), checked_out_at = NULL,
+                            verification_status = 'verified', marked_by = NULL, note = NULL"
+                    );
+                    $insert->execute([(int) $applicationId, $eventDateId]);
+                    $message = 'Check-in recorded.';
+                    $logAction = 'attendance.checked_in';
+                } else {
+                    $message = 'Check-in was already recorded.';
+                }
+            } else {
+                if (!$attendance || $attendance['status'] !== 'present' || $attendance['scanned_at'] === null) {
+                    throw new RuntimeException('Check in first before checking out.');
+                }
+                if ($attendance['verification_status'] !== 'verified') {
+                    throw new RuntimeException('Your check-in must be verified before checking out.');
+                }
+                if ($attendance['checked_out_at'] !== null) {
+                    throw new RuntimeException('You have already checked out for this event date.');
+                }
+                $checkOut = $this->db->prepare(
+                    "UPDATE attendance SET checked_out_at = GREATEST(NOW(), scanned_at), verification_status = 'verified' WHERE id = ?"
+                );
+                $checkOut->execute([(int) $attendance['id']]);
+                $message = 'Check-out recorded.';
+                $logAction = 'attendance.checked_out';
+            }
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+        if ($logAction !== null) {
+            $this->logActivity($logAction, 'event_date', $eventDateId, ['event_id' => (int) $date['event_id']]);
+        }
+        Http::json([
+            'message' => $message,
+            'status' => 'present',
+            'action' => $action,
+            'eventDateId' => $eventDateId,
+        ]);
     }
 
     private function overrideAttendance(): never
@@ -3456,6 +4088,13 @@ final class ApiController
         if (!in_array($status, ['present', 'absent', 'excused'], true)) {
             throw new RuntimeException('Attendance status must be present, absent, or excused.');
         }
+        $verificationStatus = (string) ($data['verificationStatus'] ?? 'verified');
+        if (!in_array($verificationStatus, ['pending', 'verified'], true)) {
+            throw new RuntimeException('Attendance verification status must be pending or verified.');
+        }
+        if ($status === 'present' && $verificationStatus !== 'verified') {
+            throw new RuntimeException('Present attendance must be verified.');
+        }
         $statement = $this->db->prepare(
             'SELECT ea.event_id FROM event_applications ea JOIN event_dates ed ON ed.event_id = ea.event_id WHERE ea.id = ? AND ed.id = ?'
         );
@@ -3466,16 +4105,25 @@ final class ApiController
         }
         $this->assertEventOrganizer((int) $eventId, $user);
         $upsert = $this->db->prepare(
-            'INSERT INTO attendance (application_id, event_date_id, status, marked_by, note) VALUES (?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by), note = VALUES(note)'
+            "INSERT INTO attendance
+                (application_id, event_date_id, status, verification_status, marked_by, note)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE status = VALUES(status),
+                scanned_at = IF(VALUES(status) = 'present', scanned_at, NULL),
+                checked_out_at = IF(VALUES(status) = 'present', checked_out_at, NULL),
+                verification_status = VALUES(verification_status),
+                marked_by = VALUES(marked_by), note = VALUES(note)"
         );
-        $upsert->execute([$applicationId, $eventDateId, $status, $user['id'], trim((string) ($data['note'] ?? '')) ?: null]);
+        $upsert->execute([
+            $applicationId, $eventDateId, $status, $verificationStatus,
+            $user['id'], trim((string) ($data['note'] ?? '')) ?: null,
+        ]);
         $this->logActivity('attendance.status_overridden', 'event_date', $eventDateId, [
             'event_id' => (int) $eventId,
             'application_id' => $applicationId,
             'status' => $status,
         ]);
-        Http::json(['status' => $status]);
+        Http::json(['status' => $status, 'verificationStatus' => $verificationStatus]);
     }
 
     private function listParticipantCounts(int $eventDateId): never
@@ -3596,13 +4244,17 @@ final class ApiController
             $statement->execute($params);
             $rows = $statement->fetchAll();
             $escape = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $logoDataUri = $this->logoDataUri();
             $html = '<!doctype html><html><head><meta charset="utf-8"><style>
                 body{font-family:DejaVu Sans,sans-serif;color:#172b27;font-size:10px}
-                h1{font-size:18px;color:#123d36}p{color:#52655e}
+                h1{font-size:18px;color:#123d36;margin:0}p{color:#52655e}
+                .report-brand{width:100%;border-collapse:collapse;margin:0 0 8px}
+                .report-brand td{border:0;padding:0 8px 0 0;vertical-align:middle}
+                .report-brand img{width:34px;height:42px}
                 table{width:100%;border-collapse:collapse;margin-top:18px}
                 th,td{border:1px solid #d9e3de;padding:7px;text-align:left}
                 th{background:#eaf3ee;color:#123d36}
-                </style></head><body><h1>UCC-CES Project Report</h1><p>Date range ' .
+                </style></head><body><table class="report-brand"><tr><td style="width:44px"><img src="' . $logoDataUri . '" alt="UCC logo"></td><td><h1>UCC-CES Project Report</h1></td></tr></table><p>Date range ' .
                 $escape($from) . ' to ' . $escape($to) .
                 '</p><table><thead><tr><th>ID</th><th>Project</th><th>Status</th><th>Period</th><th>Budget</th><th>Partners</th><th>Events</th><th>Created</th></tr></thead><tbody>';
             foreach ($rows as $row) {
@@ -3751,7 +4403,10 @@ final class ApiController
                 'attendance' =>
                     "SELECT a.id, e.title AS subject, p.title AS context, a.status,
                             COALESCE(a.scanned_at, CONCAT(ed.event_date, ' 00:00:00')) AS report_date,
-                            CONCAT(u.first_name, ' ', u.last_name, IF(a.note IS NULL, '', CONCAT(' · ', a.note))) AS details,
+                            CONCAT(u.first_name, ' ', u.last_name,
+                                IF(a.checked_out_at IS NULL, '', CONCAT(' · Checked out ', a.checked_out_at)),
+                                ' · Verification: ', a.verification_status,
+                                IF(a.note IS NULL, '', CONCAT(' · ', a.note))) AS details,
                             e.organizer_user_id AS partner_id, $category AS category,
                             IF(a.status = 'present', 1, 0) AS metric_value,
                             NULL AS rating_value, ea.volunteer_user_id AS volunteer_id
@@ -3869,7 +4524,7 @@ final class ApiController
             array_push($params, $search, $search, $search, $search);
         }
         $sql = 'SELECT id, subject, context, status, report_date, details, metric_value, rating_value, category, volunteer_id FROM (' . $baseQuery . ') report WHERE ' .
-            implode(' AND ', $where) . ' ORDER BY report_date DESC LIMIT 2000';
+            implode(' AND ', $where) . ' ORDER BY report_date DESC';
         $statement = $this->db->prepare($sql);
         $statement->execute($params);
         $rows = $statement->fetchAll();
@@ -3941,13 +4596,17 @@ final class ApiController
         }
         if ($format === 'pdf') {
             $escape = static fn (string $value): string => htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $logoDataUri = $this->logoDataUri();
             $html = '<!doctype html><html><head><meta charset="utf-8"><style>
                 body{font-family:DejaVu Sans,sans-serif;color:#172b27;font-size:9px}
-                h1{font-size:18px;color:#123d36}p{color:#52655e}
+                h1{font-size:18px;color:#123d36;margin:0}p{color:#52655e}
+                .report-brand{width:100%;border-collapse:collapse;margin:0 0 8px}
+                .report-brand td{border:0;padding:0 8px 0 0;vertical-align:middle}
+                .report-brand img{width:34px;height:42px}
                 table{width:100%;border-collapse:collapse;margin-top:18px}
                 th,td{border:1px solid #d9e3de;padding:6px;text-align:left}
                 th{background:#eaf3ee;color:#123d36}
-                </style></head><body><h1>UCC-CES ' . $escape(ucfirst($module)) . ' Report</h1><p>Date range ' .
+                </style></head><body><table class="report-brand"><tr><td style="width:44px"><img src="' . $logoDataUri . '" alt="UCC logo"></td><td><h1>UCC-CES ' . $escape(ucfirst($module)) . ' Report</h1></td></tr></table><p>Date range ' .
                 $escape($from) . ' to ' . $escape($to) . ' · Non-financial data</p><table><thead><tr>' .
                 '<th>Record</th><th>Related context</th><th>Status</th><th>Date</th><th>Details</th><th>Classification / category</th><th>Hours / count</th><th>Rating</th></tr></thead><tbody>';
             foreach ($rows as $row) {
@@ -4086,7 +4745,7 @@ final class ApiController
     private function notifications(): never
     {
         $user = Http::user();
-        $statement = $this->db->prepare('SELECT id, subject, message, read_at, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100');
+        $statement = $this->db->prepare('SELECT id, subject, message, read_at, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC');
         $statement->execute([(int) $user['id']]);
         Http::json(['notifications' => $statement->fetchAll()]);
     }
@@ -4180,6 +4839,7 @@ final class ApiController
 
         $title = $text($data['title'] ?? null, 'Project name', 190);
         $summary = $text($data['summary'] ?? null, 'Brief description', 10000);
+        $venue = $text($data['venue'] ?? '', 'Project venue / location', 255, false);
         $acceptsVolunteers = filter_var(
             $data['acceptsVolunteers'] ?? true,
             FILTER_VALIDATE_BOOLEAN,
@@ -4249,6 +4909,7 @@ final class ApiController
         return [
             'title' => $title,
             'summary' => $summary,
+            'venue' => $venue,
             'accepts_volunteers' => $acceptsVolunteers ? 1 : 0,
             'volunteer_approval_mode' => $approvalMode,
             'proponents' => json_encode($proponents, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),

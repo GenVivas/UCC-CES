@@ -5,6 +5,7 @@ namespace Ces;
 
 use PHPMailer\PHPMailer\Exception as MailException;
 use PHPMailer\PHPMailer\PHPMailer;
+use RuntimeException;
 
 final class NotificationService
 {
@@ -14,6 +15,29 @@ final class NotificationService
             return;
         }
 
+        try {
+            self::deliver($config, $address, $name, $subject, $message);
+        } catch (MailException $exception) {
+            error_log(sprintf('UCC-CES email delivery failed for %s: %s', $address, $exception->getMessage()));
+        }
+    }
+
+    public static function sendRequired(array $config, string $address, string $name, string $subject, string $message): void
+    {
+        if ($config['host'] === '' || $config['from'] === '') {
+            throw new RuntimeException('Password recovery email is not configured. Contact the CES administrator.', 503);
+        }
+
+        try {
+            self::deliver($config, $address, $name, $subject, $message);
+        } catch (MailException $exception) {
+            error_log(sprintf('UCC-CES password recovery email failed for %s: %s', $address, $exception->getMessage()));
+            throw new RuntimeException('The verification email could not be sent. Try again later.', 503, $exception);
+        }
+    }
+
+    private static function deliver(array $config, string $address, string $name, string $subject, string $message): void
+    {
         $mailer = new PHPMailer(true);
         try {
             $mailer->isSMTP();
@@ -35,7 +59,7 @@ final class NotificationService
             $mailer->Body = $message;
             $mailer->send();
         } catch (MailException $exception) {
-            error_log(sprintf('UCC-CES email delivery failed for %s: %s', $address, $exception->getMessage()));
+            throw $exception;
         }
     }
 }

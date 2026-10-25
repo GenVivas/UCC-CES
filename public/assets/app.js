@@ -38,6 +38,7 @@ let qrTrigger = null;
 
 function pageUrl(page) {
     const suffix = pageRoutes[page];
+    if (page === 'overview') return `${appBasePath}/portal`;
     return suffix ? `${appBasePath}/${suffix}` : `${appBasePath}/`;
 }
 
@@ -58,12 +59,12 @@ function pageFromLocation() {
     }
     const segments = path.split('/').filter(Boolean);
     const route = segments[0];
+    if (route === 'portal' || route === 'login') return 'overview';
     currentEventId = route === 'events' && /^\d+$/.test(segments[1] || '')
         ? Number(segments[1])
         : null;
     const page = Object.keys(pageRoutes).find(key => pageRoutes[key] === (route || ''));
-    if (page) return page;
-    return 'overview';
+    return page || 'overview';
 }
 
 function syncNavigation(page) {
@@ -166,9 +167,74 @@ function panel(title, description) {
     return section;
 }
 
+function renderPaginatedItems(container, items, renderItem, page, onPageChange, itemLabel = 'items') {
+    const pageSize = 10;
+    const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+    const currentPage = Math.min(Math.max(1, page), pageCount);
+    const start = items.length ? (currentPage - 1) * pageSize : 0;
+    const end = Math.min(start + pageSize, items.length);
+    container.replaceChildren(...items.slice(start, end).map(renderItem));
+
+    const controls = node('nav', undefined, 'pagination-controls');
+    controls.setAttribute('aria-label', `${itemLabel} pages`);
+    const count = node('span', items.length
+        ? `Showing ${start + 1}–${end} of ${items.length} ${itemLabel}`
+        : `Showing 0 of 0 ${itemLabel}`, 'pagination-count');
+    const previous = node('button', 'Previous', 'button button-quiet button-small');
+    previous.type = 'button';
+    previous.disabled = currentPage <= 1;
+    previous.addEventListener('click', () => onPageChange(currentPage - 1));
+    const next = node('button', 'Next', 'button button-quiet button-small');
+    next.type = 'button';
+    next.disabled = currentPage >= pageCount;
+    next.addEventListener('click', () => onPageChange(currentPage + 1));
+    const pageButtons = node('div', undefined, 'pagination-page-numbers');
+    const visiblePages = new Set([1, pageCount]);
+    for (let number = Math.max(1, currentPage - 2); number <= Math.min(pageCount, currentPage + 2); number++) {
+        visiblePages.add(number);
+    }
+    let previousPage = 0;
+    for (const number of [...visiblePages].sort((left, right) => left - right)) {
+        if (number - previousPage > 1) {
+            pageButtons.append(node('span', '…', 'pagination-ellipsis'));
+        }
+        const pageButton = node('button', number, 'button button-quiet button-small');
+        pageButton.type = 'button';
+        pageButton.setAttribute('aria-label', `Page ${number}`);
+        if (number === currentPage) {
+            pageButton.setAttribute('aria-current', 'page');
+            pageButton.classList.add('is-current');
+        }
+        pageButton.addEventListener('click', () => onPageChange(number));
+        pageButtons.append(pageButton);
+        previousPage = number;
+    }
+    controls.append(count, previous, pageButtons, next);
+    return controls;
+}
+
+function appendPaginatedRecords(parent, records, itemLabel, className = 'record-list') {
+    const list = node('div', undefined, className);
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, itemLabel);
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    parent.append(list, pagination);
+}
+
 async function loadSession() {
     try {
         const session = await request('/session');
+        if (typeof session.csrfToken !== 'string' || !session.csrfToken) {
+            throw new Error('Your session could not be verified. Refresh the page and try again.');
+        }
         csrfToken = session.csrfToken;
         if (session.user) {
             enterApp(session.user);
@@ -203,7 +269,7 @@ function enterApp(user) {
     authView.hidden = true;
     appView.hidden = false;
     topActions.hidden = false;
-    document.querySelector('#user-label').textContent = `${user.firstName} ${user.lastName} · ${user.role}`;
+    document.querySelector('#user-label').textContent = `${user.firstName} ${user.lastName} · ${user.role.toLocaleUpperCase('en')}`;
     document.querySelectorAll('.nav-item').forEach(item => {
         const allowedRoles = item.dataset.roles?.split(',') || ['admin', 'partner', 'volunteer'];
         item.hidden = !allowedRoles.includes(user.role) || (item.classList.contains('admin-only') && user.role !== 'admin');
@@ -396,6 +462,133 @@ document.querySelector('#login-form').addEventListener('submit', async event => 
     }
 });
 
+document.querySelector('#forgot-password-button').addEventListener('click', () => {
+    openForgotPasswordDialog();
+});
+
+function openForgotPasswordDialog() {
+    const dialog = node('dialog', undefined, 'account-confirmation-modal forgot-password-dialog');
+    const content = node('section', undefined, 'partner-invite-content');
+    const header = node('header', undefined, 'partner-invite-header');
+    const heading = node('div');
+    heading.append(
+        node('span', 'ACCOUNT RECOVERY', 'auth-card-kicker'),
+        node('h2', 'Reset your password'),
+        node('p', 'Verify your email with a one-time code, then choose a new password.')
+    );
+    const close = button('×', '', 'button button-quiet volunteer-checkin-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close password recovery');
+    header.append(heading, close);
+    const notice = node('div', undefined, 'notice');
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    notice.hidden = true;
+    const form = node('form', undefined, 'panel-form');
+    form.innerHTML = `
+        <fieldset class="forgot-password-step form-stack" data-recovery-step="email">
+            <label>Email address<input name="email" type="email" maxlength="190" autocomplete="email" required></label>
+            <button class="button button-primary" type="submit">Send verification code</button>
+        </fieldset>
+        <fieldset class="forgot-password-step form-stack" data-recovery-step="code" hidden disabled>
+            <label>Six-digit email code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+            <button class="button button-primary" type="submit">Verify code</button>
+            <button class="button button-quiet" type="button" data-recovery-resend>Resend code</button>
+        </fieldset>
+        <fieldset class="forgot-password-step form-stack" data-recovery-step="password" hidden disabled>
+            <label>New password (at least 12 characters)<input name="newPassword" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+            <label>Confirm new password<input name="confirmation" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+            <button class="button button-primary" type="submit">Save new password</button>
+        </fieldset>`;
+    let recoveryStep = 'email';
+    let resetToken = '';
+    const showStep = step => {
+        recoveryStep = step;
+        form.querySelectorAll('[data-recovery-step]').forEach(fieldset => {
+            const active = fieldset.dataset.recoveryStep === step;
+            fieldset.hidden = !active;
+            fieldset.disabled = !active;
+        });
+    };
+    const sendCode = async () => {
+        const email = form.elements.email.value.trim();
+        if (!form.elements.email.checkValidity()) {
+            form.elements.email.reportValidity();
+            return;
+        }
+        setBusy(form, true);
+        try {
+            const result = await request('/password/forgot', {
+                method: 'POST',
+                body: JSON.stringify({ email })
+            });
+            showStep('code');
+            showMessage(notice, result.message);
+            form.elements.code.focus();
+        } catch (error) {
+            showMessage(notice, error.message, 'error');
+        } finally {
+            setBusy(form, false);
+        }
+    };
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (recoveryStep === 'email') {
+            await sendCode();
+            return;
+        }
+        if (recoveryStep === 'code') {
+            setBusy(form, true);
+            try {
+                const result = await request('/password/forgot/verify', {
+                    method: 'POST',
+                    body: JSON.stringify({ email: form.elements.email.value.trim(), code: form.elements.code.value.trim() })
+                });
+                resetToken = result.resetToken;
+                showStep('password');
+                showMessage(notice, 'Email verified. Choose a new password.');
+                form.elements.newPassword.focus();
+            } catch (error) {
+                showMessage(notice, error.message, 'error');
+            } finally {
+                setBusy(form, false);
+            }
+            return;
+        }
+        if (form.elements.newPassword.value !== form.elements.confirmation.value) {
+            showMessage(notice, 'New password and confirmation do not match.', 'error');
+            return;
+        }
+        setBusy(form, true);
+        try {
+            const result = await request('/password/reset', {
+                method: 'POST',
+                body: JSON.stringify({
+                    email: form.elements.email.value.trim(),
+                    resetToken,
+                    newPassword: form.elements.newPassword.value,
+                    confirmation: form.elements.confirmation.value
+                })
+            });
+            dialog.close();
+            showMessage(authMessage, result.message);
+        } catch (error) {
+            showMessage(notice, error.message, 'error');
+        } finally {
+            setBusy(form, false);
+        }
+    });
+    form.querySelector('[data-recovery-resend]').addEventListener('click', sendCode);
+    content.append(header, notice, form);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target === close) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+}
+
 registrationForm.addEventListener('submit', async event => {
     event.preventDefault();
     clearMessage(authMessage);
@@ -437,7 +630,8 @@ registrationForm.addEventListener('submit', async event => {
 
 document.querySelector('#logout-button').addEventListener('click', async () => {
     try {
-        await request('/logout', { method: 'POST', body: '{}' });
+        const result = await request('/logout', { method: 'POST', body: '{}' });
+        csrfToken = result.csrfToken;
         currentUser = null;
         showAuth();
     } catch (error) {
@@ -547,7 +741,7 @@ async function renderPage(page) {
         'joined-events': ['volunteer'],
         certificates: ['volunteer'],
         evaluations: ['admin', 'partner', 'volunteer'],
-        documentations: ['volunteer'],
+        documentations: ['partner', 'volunteer'],
         'activity-logs': ['admin']
     };
     if (pageRoles[page] && !pageRoles[page].includes(currentUser.role)) {
@@ -572,7 +766,9 @@ async function renderPage(page) {
         applications: ['My Applications', 'Track pending, approved, and declined event applications.'],
         'joined-events': ['Joined Events', 'Review approved registrations and check in using event QR codes.'],
         certificates: ['Certificates', 'View, download, and print certificates issued for your participation.'],
-        documentations: ['My Documentations', 'Upload and manage your field photos, reports, and accomplishments.'],
+        documentations: currentUser.role === 'partner'
+            ? ['My Documentations', 'Review completed events and upload supporting documentation.']
+            : ['My Documentations', 'Upload and manage your field photos, reports, and accomplishments.'],
         reports: ['System-wide Reports', 'Analyze proposals, projects, events, volunteers, partners, and feedback.'],
         notifications: ['Notifications', 'Your latest system updates.'],
         evaluations: currentUser.role === 'volunteer'
@@ -596,7 +792,10 @@ async function renderPage(page) {
             if (currentUser.role === 'volunteer') await renderVolunteerEvaluations();
             else await renderEvaluationReports();
         }
-        if (page === 'documentations') await renderVolunteerDocumentations();
+        if (page === 'documentations') {
+            if (currentUser.role === 'partner') await renderPartnerDocumentations();
+            else await renderVolunteerDocumentations();
+        }
         if (page === 'event-history') await renderEventHistory();
         if (page === 'activity-logs') await renderActivityLogs();
         if (page === 'profile') await renderProfile();
@@ -717,7 +916,7 @@ function renderVolunteerOverview(dashboard) {
             const info = node('div', undefined, 'record-main');
             info.append(
                 node('strong', item.event_title),
-                node('small', `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}${item.scanned_at ? ` · Checked in ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}`)
+                node('small', `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}${item.scanned_at ? ` · In ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}${item.checked_out_at ? ` · Out ${dashboardDate(item.checked_out_at, { hour: 'numeric', minute: '2-digit' })}` : ''}`)
             );
             const indicator = node('span', `${renderedHours.toFixed(1)} hrs`, 'volunteer-activity-hours');
             record.append(info, indicator);
@@ -1095,9 +1294,12 @@ function renderAdminOverview(overview) {
 
 async function renderProposals() {
     if (currentUser.role === 'partner') {
-        const { categories } = await request('/categories');
+        const [{ categories }, { partners }] = await Promise.all([
+            request('/categories'),
+            request('/collaborators/partners')
+        ]);
         const section = panel('Start a proposal', 'Complete the four project-brief sections to save a draft. Attach the required documents before submitting it for CES Admin review.');
-        const form = createProposalWizard(categories);
+        const form = createProposalWizard(categories, partners);
         form.addEventListener('submit', createProposal);
         section.append(form);
         pageContent.append(section);
@@ -1106,11 +1308,12 @@ async function renderProposals() {
     const section = panel('Proposal register', 'Search proposals by title or proposer and filter by current status.');
     section.classList.add('proposal-register');
     const filters = node('div', undefined, 'proposal-filters');
-    filters.innerHTML = '<label>Search<input name="search" type="search" placeholder="Search title or proposer"></label><label>Status<select name="status"><option value="">All statuses</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="revision">Needs revision</option><option value="approved">Approved</option><option value="active">Active</option><option value="rejected">Rejected</option></select></label>';
+    filters.innerHTML = '<label>Search<input name="search" type="search" placeholder="Search title or proposer"></label><label>Status<select name="status"><option value="">All statuses</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="revision">Needs revision</option><option value="approved">Approved</option><option value="active">Activated</option><option value="rejected">Rejected</option></select></label>';
     const tableWrap = node('div', undefined, 'proposal-table-wrap');
     const table = node('table', undefined, 'proposal-table');
     table.innerHTML = '<thead><tr><th scope="col">Proposal</th><th scope="col">Proposer</th><th scope="col">Status</th><th scope="col">Project dates</th><th scope="col">Updated</th><th scope="col">Actions</th></tr></thead>';
     const body = node('tbody');
+    const proposalRows = [];
     proposals.forEach(proposal => {
         const row = node('tr');
         row.dataset.status = proposal.status;
@@ -1127,7 +1330,7 @@ async function renderProposals() {
             under_review: 'Under review',
             revision: 'Needs revision',
             approved: 'Approved',
-            active: 'Active',
+            active: 'Activated',
             rejected: 'Rejected'
         }[proposal.status] || dashboardStatusLabel(proposal.status);
         const statusCell = node('td');
@@ -1165,11 +1368,11 @@ async function renderProposals() {
                 button('Decline', `collaborate-${proposal.id}-declined`, 'button button-danger button-small')
             );
         }
-        const canInviteCollaborator = ['submitted', 'under_review', 'revision', 'approved', 'active'].includes(proposal.status) &&
+        const canInviteCollaborator = proposal.status === 'approved' &&
             (currentUser.role === 'admin' ||
                 (currentUser.role === 'partner' && Number(proposal.owner_user_id) === currentUser.id));
         if (canInviteCollaborator) {
-            actions.append(button('Invite partner', `invitepartner-${proposal.id}`, 'button button-quiet button-small'));
+            actions.append(button('Invite Partner', `invitepartner-${proposal.id}`, 'button button-quiet button-small'));
         }
         if (currentUser.role === 'admin' && ['submitted', 'under_review'].includes(proposal.status)) {
             const reviewNote = node('textarea');
@@ -1188,19 +1391,44 @@ async function renderProposals() {
         }
         actionsCell.append(actions);
         row.append(titleCell, proposerCell, statusCell, datesCell, updatedCell, actionsCell);
-        body.append(row);
+        proposalRows.push(row);
     });
     table.append(body);
     tableWrap.append(table);
     const empty = node('div', proposals.length ? 'No proposals match these filters.' : 'No proposals to show yet.', 'empty proposal-empty');
     empty.hidden = proposals.length > 0;
-    filters.addEventListener('input', () => filterProposalRows(body, filters, empty));
-    filters.addEventListener('change', () => filterProposalRows(body, filters, empty));
+    let proposalPage = 1;
+    let pagination;
+    const renderProposalRows = () => {
+        const search = filters.querySelector('[name="search"]').value.trim().toLocaleLowerCase();
+        const status = filters.querySelector('[name="status"]').value;
+        const visibleRows = proposalRows.filter(row =>
+            (!search || row.dataset.search.includes(search)) &&
+            (!status || row.dataset.status === status)
+        );
+        pagination?.remove();
+        pagination = renderPaginatedItems(body, visibleRows, row => row, proposalPage, nextPage => {
+            proposalPage = nextPage;
+            renderProposalRows();
+        }, 'proposals');
+        proposalPage = Math.min(proposalPage, Math.max(1, Math.ceil(visibleRows.length / 10)));
+        tableWrap.after(pagination);
+        empty.hidden = visibleRows.length > 0;
+    };
+    filters.addEventListener('input', () => {
+        proposalPage = 1;
+        renderProposalRows();
+    });
+    filters.addEventListener('change', () => {
+        proposalPage = 1;
+        renderProposalRows();
+    });
     section.append(filters, tableWrap, empty);
     pageContent.append(section);
+    renderProposalRows();
 }
 
-function createProposalWizard(categories, proposal = null) {
+function createProposalWizard(categories, partners, proposal = null) {
     const form = node('form', undefined, 'panel-form proposal-wizard-form');
     form.noValidate = true;
     form.innerHTML = `
@@ -1212,6 +1440,7 @@ function createProposalWizard(categories, proposal = null) {
             <h3>1. General Project Information</h3>
             <label>Project Name<input name="title" maxlength="190" required></label>
             <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
+            <label class="wide">Project Venue / Location<input name="venue" maxlength="255" placeholder="Enter a venue or leave blank if it is still to be determined"></label>
             <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Entities</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add proponent</button></div><div data-proponents-list></div></div>
             <label>Program Start Date<input name="periodStart" type="date" required></label>
             <label>Program End Date<input name="periodEnd" type="date" required></label>
@@ -1274,6 +1503,7 @@ function createProposalWizard(categories, proposal = null) {
 
     form.elements.title.value = proposal?.title || '';
     form.elements.summary.value = proposal?.summary || '';
+    form.elements.venue.value = proposal?.venue || '';
     form.elements.acceptsVolunteers.checked = proposal?.acceptsVolunteers ?? true;
     form.elements.volunteerApprovalMode.value = proposal?.volunteerApprovalMode || 'manual';
     const volunteerModeWrap = form.querySelector('[data-volunteer-mode-wrap]');
@@ -1289,7 +1519,7 @@ function createProposalWizard(categories, proposal = null) {
     form.elements.targetOutputs.value = proposal?.targetOutputs || '';
     form.elements.possibleRisks.value = proposal?.possibleRisks || '';
     form.elements.expectedPrivatePartnerships.value = proposal?.expectedPrivatePartnerships || '';
-    (proposal?.proponents?.length ? proposal.proponents : ['']).forEach(value => addProposalTextRow(form, 'proponents', value));
+    (proposal?.proponents?.length ? proposal.proponents : ['']).forEach(value => addProposalPartnerRow(form, partners, value));
     (proposal?.activityComponents?.length ? proposal.activityComponents : ['']).forEach(value => addProposalTextRow(form, 'activities', value));
     (proposal?.estimatedCostItems?.length ? proposal.estimatedCostItems : [{}]).forEach(value => addProposalBudgetRow(form, value));
 
@@ -1305,12 +1535,6 @@ function createProposalWizard(categories, proposal = null) {
         if (invalid) {
             invalid.reportValidity();
             invalid.focus();
-            return false;
-        }
-        if (index === 0 && !form.querySelector('[data-proponents-list] input').value.trim()) {
-            form.querySelector('[data-proponents-list] input').setCustomValidity('Add at least one co-proponent or partner entity.');
-            form.querySelector('[data-proponents-list] input').reportValidity();
-            form.querySelector('[data-proponents-list] input').setCustomValidity('');
             return false;
         }
         if (index === 1 && !Array.from(step.querySelectorAll('[data-activities-list] textarea')).some(input => input.value.trim())) {
@@ -1344,7 +1568,7 @@ function createProposalWizard(categories, proposal = null) {
     form.addEventListener('click', event => {
         const add = event.target.closest('[data-add-row]');
         if (add) {
-            if (add.dataset.addRow === 'proponents') addProposalTextRow(form, 'proponents');
+            if (add.dataset.addRow === 'proponents') addProposalPartnerRow(form, partners);
             if (add.dataset.addRow === 'activities') addProposalTextRow(form, 'activities');
             if (add.dataset.addRow === 'budget') addProposalBudgetRow(form);
             return;
@@ -1360,10 +1584,123 @@ function createProposalWizard(categories, proposal = null) {
         if (event.target.matches('[data-budget-cost], [data-budget-quantity]')) updateProposalBudgetTotal(form);
         if (event.target.name === 'periodStart') form.elements.periodEnd.min = event.target.value;
     });
+    form.addEventListener('change', event => {
+        const selector = event.target.closest('[data-partner-selector]');
+        if (!selector) return;
+        if (selector.value === 'new') {
+            const previousValue = selector.dataset.previousValue || '';
+            selector.value = previousValue;
+            openPartnerAccountDialog(partners, account => {
+                const option = new Option(`${account.organization_name} (Pending Approval)`, account.id, true, true);
+                option.dataset.partnerName = account.organization_name;
+                selector.add(option);
+                selector.value = String(account.id);
+                selector.dataset.previousValue = String(account.id);
+            });
+            return;
+        }
+        selector.dataset.previousValue = selector.value;
+    });
     form.elements.periodEnd.min = form.elements.periodStart.value;
     updateProposalBudgetTotal(form);
     showStep(0);
     return form;
+}
+
+function addProposalPartnerRow(form, partners, selectedName = '') {
+    const row = node('div', undefined, 'proposal-editor-row');
+    row.dataset.editorRow = '';
+    const select = node('select');
+    select.required = true;
+    select.setAttribute('aria-label', 'Co-proponent or partner entity');
+    select.dataset.partnerSelector = '';
+    select.add(new Option('Choose an approved partner entity', ''));
+    partners.forEach(partner => {
+        const option = new Option(partner.organization_name, partner.id);
+        option.dataset.partnerName = partner.organization_name;
+        select.add(option);
+    });
+    if (selectedName && !partners.some(partner => partner.organization_name === selectedName)) {
+        const legacy = new Option(`${selectedName} (existing entry)`, `legacy:${selectedName}`);
+        legacy.dataset.partnerName = selectedName;
+        select.add(legacy);
+    }
+    select.add(new Option('+ Create New Partner Account', 'new'));
+    const selected = partners.find(partner => partner.organization_name === selectedName);
+    select.value = selected ? String(selected.id) : (selectedName ? `legacy:${selectedName}` : '');
+    select.dataset.previousValue = select.value;
+    row.append(select, proposalRemoveButton());
+    const list = form.querySelector('[data-proponents-list]');
+    list.dataset.rowList = '';
+    list.append(row);
+}
+
+function openPartnerAccountDialog(partners, onCreated) {
+    const dialog = node('dialog', undefined, 'partner-invite-dialog');
+    const content = node('section', undefined, 'partner-invite-content');
+    const header = node('header', undefined, 'partner-invite-header');
+    const heading = node('div');
+    heading.append(
+        node('span', 'PARTNER REGISTRATION', 'auth-card-kicker'),
+        node('h2', 'Create a Partner Account'),
+        node('p', 'The new entity will remain Pending Approval until a CES Admin reviews it.')
+    );
+    const close = button('×', 'close-partner-invite', 'button button-quiet volunteer-checkin-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close partner registration');
+    header.append(heading, close);
+    const form = node('form', undefined, 'panel-form');
+    form.innerHTML = `
+        <div class="form-grid">
+            <label>Organization name<input name="organizationName" maxlength="190" required></label>
+            <label>Organization category<select name="organizationCategory" required>
+                <option value="">Choose a category</option>
+                <option value="UCC Department / Academic Unit">UCC Department / Academic Unit</option>
+                <option value="Local Government Unit (LGU / Barangay)">Local Government Unit (LGU / Barangay)</option>
+                <option value="Government Agency (e.g., MMDA, DSWD)">Government Agency</option>
+                <option value="NGO / Non-Profit Organization">NGO / Non-Profit Organization</option>
+                <option value="Private Sector / Corporate Partner">Private Sector / Corporate Partner</option>
+            </select></label>
+            <label>Representative first name<input name="firstName" maxlength="100" autocomplete="given-name" required></label>
+            <label>Representative last name<input name="lastName" maxlength="100" autocomplete="family-name" required></label>
+            <label>Official designation<input name="officialDesignation" maxlength="190" required></label>
+            <label>Contact number<input name="contactNumber" type="tel" maxlength="40" autocomplete="tel" required></label>
+            <label>Email address<input name="email" type="email" maxlength="190" autocomplete="email" required></label>
+            <label>Password (at least 12 characters)<input name="password" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+            <label>Confirm password<input name="confirmation" type="password" minlength="12" maxlength="200" autocomplete="new-password" required></label>
+        </div>
+        <div class="partner-invite-actions">
+            <button class="button button-quiet" type="button" data-action="close-partner-invite">Cancel</button>
+            <button class="button button-primary" type="submit">Create Pending Account</button>
+        </div>`;
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        try {
+            const result = await request('/partners/accounts', {
+                method: 'POST',
+                body: JSON.stringify(Object.fromEntries(new FormData(form)))
+            });
+            const account = { id: result.id, organization_name: result.organization_name };
+            partners.push(account);
+            dialog.close();
+            onCreated(account);
+            showMessage(pageMessage, result.message || 'Partner account created as Pending Approval.');
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+            submit.disabled = false;
+        }
+    });
+    content.append(header, form);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="close-partner-invite"]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    pageContent.append(dialog);
+    dialog.showModal();
 }
 
 function showProposalWizardStep(form, index, titles = [
@@ -1472,7 +1809,10 @@ function serializeProposalWizard(form) {
     const data = Object.fromEntries(formData);
     data.acceptsVolunteers = form.elements.acceptsVolunteers.checked;
     data.volunteerApprovalMode = form.elements.volunteerApprovalMode.value;
-    data.proponents = Array.from(form.querySelectorAll('[data-proponents-list] input')).map(input => input.value.trim()).filter(Boolean);
+    data.venue = form.elements.venue.value.trim();
+    data.proponents = Array.from(form.querySelectorAll('[data-proponents-list] select[data-partner-selector]'))
+        .map(select => select.selectedOptions[0]?.dataset.partnerName || '')
+        .filter(Boolean);
     data.activityComponents = Array.from(form.querySelectorAll('[data-activities-list] textarea')).map(input => input.value.trim()).filter(Boolean);
     data.estimatedCostItems = Array.from(form.querySelectorAll('[data-budget-list] [data-editor-row]')).map(row => ({
         description: row.querySelector('[data-budget-field="description"]').value.trim(),
@@ -1488,19 +1828,11 @@ function serializeProposalWizard(form) {
 function validateCompleteProposalWizard(form) {
     for (let index = 0; index < 4; index++) {
         const step = form.querySelector(`[data-wizard-step="${index}"]`);
-        const invalid = Array.from(step.querySelectorAll('input[required], textarea[required]')).find(input => !input.checkValidity());
+        const invalid = Array.from(step.querySelectorAll('input[required], textarea[required], select[required]')).find(input => !input.checkValidity());
         if (invalid) {
             showProposalWizardStep(form, index);
             invalid.reportValidity();
             invalid.focus();
-            return false;
-        }
-        if (index === 0 && !Array.from(step.querySelectorAll('[data-proponents-list] input')).some(input => input.value.trim())) {
-            showProposalWizardStep(form, index);
-            const input = step.querySelector('[data-proponents-list] input');
-            input.setCustomValidity('Add at least one co-proponent or partner entity.');
-            input.reportValidity();
-            input.setCustomValidity('');
             return false;
         }
         if (index === 1 && !Array.from(step.querySelectorAll('[data-activities-list] textarea')).some(input => input.value.trim())) {
@@ -1518,22 +1850,11 @@ function validateCompleteProposalWizard(form) {
     return true;
 }
 
-function filterProposalRows(tableBody, filters, emptyState) {
-    const search = filters.querySelector('[name="search"]').value.trim().toLocaleLowerCase();
-    const status = filters.querySelector('[name="status"]').value;
-    let visible = 0;
-    tableBody.querySelectorAll('tr').forEach(row => {
-        const matches = (!search || row.dataset.search.includes(search)) && (!status || row.dataset.status === status);
-        row.hidden = !matches;
-        if (matches) visible++;
-    });
-    emptyState.hidden = visible > 0;
-}
-
 async function editProposal(proposalId) {
-    const [{ proposal }, { categories }] = await Promise.all([
+    const [{ proposal }, { categories }, { partners }] = await Promise.all([
         request(`/proposals/${proposalId}/edit-data`),
-        request('/categories')
+        request('/categories'),
+        request('/collaborators/partners')
     ]);
     const isRevision = proposal.status === 'revision';
     const section = panel(
@@ -1549,7 +1870,7 @@ async function editProposal(proposalId) {
         feedback.append(node('p', proposal.reviewNotes));
         section.append(feedback);
     }
-    const form = createProposalWizard(categories, proposal);
+    const form = createProposalWizard(categories, partners, proposal);
     form.querySelector('[data-wizard-submit]').textContent = 'Save Changes';
     const cancel = node('button', 'Cancel', 'button button-quiet');
     cancel.type = 'button';
@@ -1640,7 +1961,7 @@ async function renderEvents() {
         await renderPartnerEventsDashboard(events);
         return;
     }
-    const list = node('div', undefined, 'record-list');
+    const eventRecords = [];
     for (const item of events) {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
@@ -1679,9 +2000,9 @@ async function renderEvents() {
             );
         }
         record.append(info, actions);
-        list.append(record);
+        eventRecords.push(record);
     }
-    pageContent.append(list);
+    appendPaginatedRecords(pageContent, eventRecords, 'events');
     if (currentUser.role === 'partner') {
         await renderPartnerEventsDashboard(events);
     }
@@ -1751,6 +2072,7 @@ async function renderVolunteerEvents(events) {
     table.classList.add('volunteer-event-table');
     table.innerHTML = '<thead><tr><th>Event / Project</th><th>Date</th><th>Venue</th><th>Volunteers</th><th>Registration</th></tr></thead>';
     const body = node('tbody');
+    const eventRows = [];
     if (!events.length) {
         const row = node('tr');
         const empty = node('td', 'No active events are currently open for volunteer registration.', 'admin-event-empty');
@@ -1784,11 +2106,29 @@ async function renderVolunteerEvents(events) {
             node('td', count),
             action
         );
-        body.append(row);
+        eventRows.push(row);
     });
+    let eventPage = 1;
+    let pagination;
+    const renderEventRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(body, eventRows, row => row, eventPage, nextPage => {
+            eventPage = nextPage;
+            renderEventRows();
+        }, 'events');
+        previousPagination?.replaceWith(pagination);
+    };
+    if (eventRows.length) {
+        renderEventRows();
+    }
     table.append(body);
     wrap.append(table);
     listSection.append(wrap);
+    if (pagination) {
+        listSection.append(pagination);
+    } else {
+        listSection.append(renderPaginatedItems(node('tbody'), [], () => null, 1, () => {}, 'events'));
+    }
     pageContent.append(listSection);
 }
 
@@ -1800,6 +2140,8 @@ async function renderVolunteerApplications() {
     if (!myApplications.length) {
         section.append(node('div', 'No pending or rejected applications. Browse Events to register for a program.', 'empty'));
     }
+    const list = node('div', undefined, 'record-list');
+    const applicationRecords = [];
     const attendanceByEvent = new Map();
     attendance.forEach(record => {
         const records = attendanceByEvent.get(Number(record.event_id)) || [];
@@ -1821,11 +2163,23 @@ async function renderVolunteerApplications() {
         record.append(info, node('span', application.status, `badge status-badge status-${application.status}`));
         const eventAttendance = attendanceByEvent.get(Number(application.event_id)) || [];
         const attendanceInfo = eventAttendance.length
-            ? eventAttendance.map(item => `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}: ${item.status}${item.scanned_at ? ` · ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}`).join(' | ')
+            ? eventAttendance.map(item => `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })}: ${item.status}${item.scanned_at ? ` · In ${dashboardDate(item.scanned_at, { hour: 'numeric', minute: '2-digit' })}` : ''}${item.checked_out_at ? ` · Out ${dashboardDate(item.checked_out_at, { hour: 'numeric', minute: '2-digit' })}` : ''} · ${item.verification_status}`).join(' | ')
             : 'No attendance has been recorded yet.';
         record.append(node('small', `Attendance history: ${attendanceInfo}`, 'volunteer-attendance-history'));
-        section.append(record);
+        applicationRecords.push(record);
     });
+    let applicationPage = 1;
+    let pagination;
+    const renderPage = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, applicationRecords, item => item, applicationPage, nextPage => {
+            applicationPage = nextPage;
+            renderPage();
+        }, 'applications');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderPage();
+    section.append(list, pagination);
     pageContent.append(section);
 }
 
@@ -1837,6 +2191,7 @@ async function renderVolunteerJoinedEvents() {
     const table = node('table', undefined, 'volunteer-joined-table');
     table.innerHTML = '<thead><tr><th scope="col">Event &amp; host</th><th scope="col">Scheduled date &amp; time</th><th scope="col">Attendance</th><th scope="col">Check-in</th></tr></thead>';
     const body = node('tbody');
+    const joinedRows = [];
     const scheduleByEvent = new Map();
     schedules.forEach(schedule => {
         const eventSchedules = scheduleByEvent.get(Number(schedule.event_id)) || [];
@@ -1844,11 +2199,7 @@ async function renderVolunteerJoinedEvents() {
         scheduleByEvent.set(Number(schedule.event_id), eventSchedules);
     });
     if (!joined.length) {
-        const emptyRow = node('tr');
-        const cell = node('td', 'Approved applications will appear here. Browse Events to register.', 'empty');
-        cell.colSpan = 4;
-        emptyRow.append(cell);
-        body.append(emptyRow);
+        section.append(node('div', 'Approved applications will appear here. Browse Events to register.', 'empty'));
     }
     joined.forEach(application => {
         const eventSchedules = scheduleByEvent.get(Number(application.event_id)) || [];
@@ -1887,12 +2238,23 @@ async function renderVolunteerJoinedEvents() {
                 actionCell.append(node('span', 'No schedule yet', 'field-hint'));
             }
             row.append(eventCell, scheduleCell, attendanceCell, actionCell);
-            body.append(row);
+            joinedRows.push(row);
         });
     });
+    let joinedPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(body, joinedRows, row => row, joinedPage, nextPage => {
+            joinedPage = nextPage;
+            renderRows();
+        }, 'event dates');
+        previousPagination?.replaceWith(pagination);
+    };
     table.append(body);
     tableWrap.append(table);
-    section.append(tableWrap);
+    renderRows();
+    section.append(tableWrap, pagination);
     pageContent.append(section);
 }
 
@@ -1901,7 +2263,7 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const content = node('section', undefined, 'volunteer-checkin-modal');
     const header = node('header', undefined, 'volunteer-checkin-header');
     const heading = node('div');
-    heading.append(node('h2', 'Event QR check-in'), node('p', 'Scan the QR code for this scheduled event date to record your attendance.'));
+    heading.append(node('h2', 'Event QR attendance'), node('p', 'Choose check-in or check-out, then scan the QR code for this scheduled event date.'));
     const close = button('×', 'checkin-close', 'button button-quiet volunteer-checkin-close');
     close.setAttribute('aria-label', 'Close QR scanner');
     close.dataset.action = 'checkin-close';
@@ -1910,6 +2272,13 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const form = node('form', undefined, 'scan-form volunteer-checkin-form');
     form.dataset.eventId = eventId;
     form.dataset.expectedEventDateId = eventDateId;
+    const attendanceActionLabel = node('label', 'Attendance action');
+    const attendanceAction = node('select');
+    attendanceAction.name = 'action';
+    attendanceAction.add(new Option('Check in', 'check_in'));
+    attendanceAction.add(new Option('Check out', 'check_out'));
+    attendanceAction.setAttribute('aria-label', 'Attendance action');
+    attendanceActionLabel.append(attendanceAction);
     const cameraButton = button('Check-in via Camera', 'camera', 'button button-primary');
     cameraButton.type = 'button';
     cameraButton.dataset.action = 'camera';
@@ -1934,7 +2303,12 @@ function openVolunteerCheckin(eventId, eventDateId) {
     const submit = button('Verify & Check in', '', 'button button-primary');
     submit.type = 'submit';
     footer.append(cancel, submit);
-    form.append(cameraButton, video, status, payloadLabel, footer);
+    form.append(attendanceActionLabel, cameraButton, video, status, payloadLabel, footer);
+    attendanceAction.addEventListener('change', () => {
+        const checkingOut = attendanceAction.value === 'check_out';
+        cameraButton.textContent = checkingOut ? 'Check-out via Camera' : 'Check-in via Camera';
+        submit.textContent = checkingOut ? 'Verify & Check out' : 'Verify & Check in';
+    });
     content.append(header, form);
     dialog.append(content);
     dialog.addEventListener('click', event => {
@@ -1951,22 +2325,26 @@ function openVolunteerCheckin(eventId, eventDateId) {
         submit.disabled = true;
         try {
             const parsed = JSON.parse(new FormData(form).get('payload'));
-            await request('/attendance/scan', {
+            const result = await request('/attendance/scan', {
                 method: 'POST',
                 body: JSON.stringify({
                     ...parsed,
+                    action: attendanceAction.value,
                     eventId: Number(form.dataset.eventId),
                     expectedEventDateId: Number(form.dataset.expectedEventDateId)
                 })
             });
             stopQrCamera();
-            status.textContent = 'Check-in successful! You are now marked Present for this event.';
+            const checkedOut = result.action === 'check_out';
+            status.textContent = checkedOut
+                ? 'Check-out successful! Your attendance record now includes a check-out time.'
+                : 'Check-in successful! You are now marked Present for this event.';
             status.classList.add('is-success');
             window.setTimeout(async () => {
                 if (!dialog.isConnected || currentPage !== 'joined-events') return;
                 if (dialog.open) dialog.close();
                 await renderPage('joined-events');
-                showMessage(pageMessage, 'Check-in successful. Attendance is marked Present.');
+                showMessage(pageMessage, checkedOut ? 'Check-out successful.' : 'Check-in successful. Attendance is marked Present.');
             }, 900);
         } catch (error) {
             status.textContent = error instanceof SyntaxError ? 'Enter a valid QR payload.' : error.message;
@@ -1984,6 +2362,8 @@ async function renderVolunteerCertificates() {
     const { certificates } = await request('/volunteer/certificates');
     const section = panel('Certificates', 'Official certificates of participation issued for events you attended.');
     if (!certificates.length) section.append(node('div', 'No certificates have been issued to your account yet.', 'empty'));
+    const list = node('div', undefined, 'record-list');
+    const records = [];
     certificates.forEach(item => {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
@@ -1997,8 +2377,20 @@ async function renderVolunteerCertificates() {
         print.rel = 'noopener';
         actions.append(download, print);
         record.append(info, actions);
-        section.append(record);
+        records.push(record);
     });
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'certificates');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    section.append(list, pagination);
     pageContent.append(section);
 }
 
@@ -2040,6 +2432,8 @@ async function renderVolunteerEvaluations() {
     }
     const history = panel('Submitted evaluations');
     if (!evaluations.length) history.append(node('div', 'No evaluations submitted yet.', 'empty'));
+    const list = node('div', undefined, 'record-list');
+    const records = [];
     evaluations.forEach(item => {
         const record = node('article', undefined, 'record volunteer-application-record');
         record.append(
@@ -2047,8 +2441,20 @@ async function renderVolunteerEvaluations() {
             node('span', `${item.rating} / 5`, 'badge'),
             node('small', `${item.feedback} · ${dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })}`, 'volunteer-attendance-history')
         );
-        history.append(record);
+        records.push(record);
     });
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'evaluations');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    history.append(list, pagination);
     pageContent.append(section, history);
     if (focusEvaluationForm) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -2073,6 +2479,8 @@ async function renderVolunteerDocumentations() {
     });
     section.append(form);
     if (!documentations.length) section.append(node('div', 'No field documentation uploaded yet.', 'empty'));
+    const list = node('div', undefined, 'record-list');
+    const records = [];
     documentations.forEach(item => {
         const record = node('article', undefined, 'record volunteer-documentation-record');
         const details = node('div', undefined, 'record-main');
@@ -2093,9 +2501,139 @@ async function renderVolunteerDocumentations() {
             record.append(preview);
         }
         record.append(details, actions);
-        section.append(record);
+        records.push(record);
     });
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'files');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    section.append(list, pagination);
     pageContent.append(section);
+}
+
+async function renderPartnerDocumentations() {
+    const { events, documentations } = await request('/partner/documentations');
+    const section = panel(
+        'Completed events',
+        'Upload reports, photos, and accomplishments for your completed events. Uploads open after three full days have passed.'
+    );
+    if (!events.length) {
+        section.append(node('div', 'No completed events are linked to your partner account yet.', 'empty'));
+        pageContent.append(section);
+        return;
+    }
+    const documentationByEvent = new Map();
+    documentations.forEach(item => {
+        const list = documentationByEvent.get(Number(item.event_id)) || [];
+        list.push(item);
+        documentationByEvent.set(Number(item.event_id), list);
+    });
+    const records = events.map(item => {
+        const record = node('article', undefined, 'record partner-documentation-event');
+        const info = node('div', undefined, 'record-main');
+        info.append(
+            node('strong', item.title),
+            node('small', `${item.project_title} · Completed ${dashboardDate(item.completion_date, { month: 'short', day: 'numeric', year: 'numeric' })}`)
+        );
+        const actions = node('div', undefined, 'record-actions');
+        const upload = button(
+            Number(item.can_upload)
+                ? 'Upload documentation'
+                : `Available ${dashboardDate(item.upload_available_on, { month: 'short', day: 'numeric', year: 'numeric' })}`,
+            `eventdocupload-${item.id}`,
+            Number(item.can_upload) ? 'button button-primary button-small' : 'button button-quiet button-small'
+        );
+        upload.disabled = !Number(item.can_upload);
+        actions.append(upload);
+        record.append(info, actions);
+        const files = documentationByEvent.get(Number(item.id)) || [];
+        if (files.length) {
+            const list = node('div', undefined, 'partner-event-documentation-list');
+            files.forEach(file => {
+                const link = node('a', `${file.original_name} · ${file.documentation_type}`, 'partner-event-documentation-link');
+                link.href = `${API}/partner/documentations/${encodeURIComponent(file.id)}/file`;
+                link.target = '_blank';
+                link.rel = 'noopener';
+                link.title = `${file.event_title} · ${file.description || ''}`;
+                list.append(link);
+            });
+            record.append(list);
+        } else {
+            record.append(node('small', 'No documentation has been uploaded for this event.', 'partner-documentation-empty'));
+        }
+        return record;
+    });
+    const list = node('div', undefined, 'record-list');
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'events');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    section.append(list, pagination);
+    pageContent.append(section);
+}
+
+async function openPartnerEventDocumentation(eventId) {
+    const { events } = await request('/partner/documentations');
+    const selectedEvent = events.find(item => Number(item.id) === eventId);
+    if (!selectedEvent || !Number(selectedEvent.can_upload)) {
+        throw new Error('Documentation uploads are available only after three full days have passed from event completion.');
+    }
+    const dialog = node('dialog', undefined, 'partner-invite-dialog');
+    const content = node('section', undefined, 'partner-invite-content');
+    const header = node('header', undefined, 'partner-invite-header');
+    const heading = node('div');
+    heading.append(
+        node('span', 'EVENT DOCUMENTATION', 'auth-card-kicker'),
+        node('h2', selectedEvent.title),
+        node('p', `${selectedEvent.project_title} · Completed ${dashboardDate(selectedEvent.completion_date, { month: 'long', day: 'numeric', year: 'numeric' })}`)
+    );
+    const close = button('×', '', 'button button-quiet volunteer-checkin-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close event documentation');
+    header.append(heading, close);
+    const notice = node('div', undefined, 'notice');
+    notice.hidden = true;
+    const form = node('form', undefined, 'panel-form');
+    form.innerHTML = '<label>Documentation type<select name="type" required><option value="">Choose a type</option><option value="photo">Field photo</option><option value="report">Report</option><option value="accomplishment">Accomplishment</option><option value="other">Other</option></select></label><label>Caption / description<input name="description" maxlength="500"></label><label>File (PDF, JPG, PNG; max 10 MB)<input name="file" type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required></label><div class="partner-invite-actions"><button class="button button-quiet" type="button" data-close-event-documentation>Cancel</button><button class="button button-primary" type="submit">Upload Documentation</button></div>';
+    form.addEventListener('submit', async event => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        const payload = new FormData(form);
+        payload.set('eventId', String(eventId));
+        try {
+            const result = await request('/partner/documentations', { method: 'POST', body: payload });
+            dialog.close();
+            await renderPage('documentations');
+            showMessage(pageMessage, result.message);
+        } catch (error) {
+            showMessage(notice, error.message, 'error');
+            submit.disabled = false;
+        }
+    });
+    content.append(header, notice, form);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target === close || event.target.closest('[data-close-event-documentation]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    pageContent.append(dialog);
+    dialog.showModal();
 }
 
 function renderPartnerEventsList(events) {
@@ -2105,6 +2643,7 @@ function renderPartnerEventsList(events) {
     const table = node('table', undefined, 'admin-event-table');
     table.innerHTML = '<thead><tr><th>Event / Project</th><th>Host Partner / Department</th><th>Date &amp; Time Range</th><th>Venue / Location</th><th>Volunteers</th><th>Status</th></tr></thead>';
     const tbody = node('tbody');
+    const eventRows = [];
     if (!events.length) {
         const row = node('tr');
         const empty = node('td', 'No events are currently linked to your organization.', 'admin-event-empty');
@@ -2151,11 +2690,29 @@ function renderPartnerEventsList(events) {
             event.preventDefault();
             openRow();
         });
-        tbody.append(row);
+        eventRows.push(row);
     });
     table.append(tbody);
     wrap.append(table);
+    let pagination;
+    if (eventRows.length) {
+        let currentPage = 1;
+        const renderRows = () => {
+            const previousPagination = pagination;
+            pagination = renderPaginatedItems(tbody, eventRows, row => row, currentPage, nextPage => {
+                currentPage = nextPage;
+                renderRows();
+            }, 'events');
+            previousPagination?.replaceWith(pagination);
+        };
+        renderRows();
+    }
     section.append(wrap);
+    if (pagination) {
+        section.append(pagination);
+    } else {
+        section.append(renderPaginatedItems(node('tbody'), [], () => null, 1, () => {}, 'events'));
+    }
     pageContent.append(section);
 }
 
@@ -2235,65 +2792,24 @@ async function renderEventDetails(eventId) {
     });
     details.append(detailGrid);
     const actions = node('div', undefined, 'event-detail-actions');
+    const isOngoing = statusValue === 'ongoing';
+    if (!isOngoing) {
+        actions.append(button('View Attendance Log', `attendance-log-${event.id}`, 'button button-quiet button-small'));
+    }
     actions.append(
-        button('Manage Volunteers', `applications-${event.id}`, 'button button-primary button-small'),
-        button('View Attendance Log', `dates-${event.id}`, 'button button-quiet button-small'),
         button('Export Attendance CSV', `attendexport-${event.id}`, 'button button-quiet button-small'),
         button('Print / Save as PDF', 'print-event-detail', 'button button-quiet button-small')
     );
-    const editButton = button('Edit Details', 'toggle-event-edit', 'button button-quiet button-small');
-    actions.append(editButton);
     details.append(actions);
-    const editForm = node('form', undefined, 'panel-form event-detail-edit-form');
-    editForm.hidden = true;
-    const dateTimeValue = value => value ? String(value).replace(' ', 'T').slice(0, 16) : '';
-    editForm.innerHTML = `
-        <label>Event title<input name="title" maxlength="190" required></label>
-        <label>Volunteer capacity<input name="capacity" type="number" min="1" max="100000" required></label>
-        <label class="wide">Description<textarea name="description" rows="3" maxlength="10000"></textarea></label>
-        <label>Applications open at<input name="applicationsOpenAt" type="datetime-local"></label>
-        <label>Applications close at<input name="applicationsCloseAt" type="datetime-local"></label>
-        <button class="button button-primary" type="submit">Save Event Details</button>`;
-    editForm.elements.title.value = event.title || '';
-    editForm.elements.capacity.value = Number(event.capacity || 1);
-    editForm.elements.description.value = event.description || '';
-    editForm.elements.applicationsOpenAt.value = dateTimeValue(event.applications_open_at);
-    editForm.elements.applicationsCloseAt.value = dateTimeValue(event.applications_close_at);
-    editButton.addEventListener('click', () => {
-        editForm.hidden = !editForm.hidden;
-        if (!editForm.hidden) editForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-    editForm.addEventListener('submit', async submitEvent => {
-        submitEvent.preventDefault();
-        if (!editForm.reportValidity()) return;
-        const submitButton = editForm.querySelector('[type="submit"]');
-        submitButton.disabled = true;
-        try {
-            await request(`/events/${event.id}/details`, {
-                method: 'PUT',
-                body: JSON.stringify(Object.fromEntries(new FormData(editForm)))
-            });
-            await renderPage('events');
-            showMessage(pageMessage, 'Event details updated.');
-        } catch (error) {
-            showMessage(pageMessage, error.message, 'error');
-        } finally {
-            submitButton.disabled = false;
-        }
-    });
-    details.append(editForm);
     pageContent.append(details);
-    if (['admin', 'partner'].includes(currentUser.role)) {
-        await showApplications(event.id, { prepend: false });
-    }
 
-    const qrPanel = panel('Attendee Check-in QR Codes', "A date-specific QR code is available on each scheduled event day. Approved volunteers can scan that day's code to record attendance.");
+    const qrPanel = panel('Attendee Attendance QR Codes', "A date-specific QR code is available on each scheduled event day. Approved volunteers can scan that day's code to check in or check out.");
     qrPanel.classList.add('event-detail-qr-panel');
     const qrCards = node('div', undefined, 'event-detail-qr-grid');
     if (!['approved', 'active'].includes(event.proposal_status)) {
-        qrCards.append(node('p', 'Check-in QR codes are available only for approved or active projects on a scheduled event date.', 'empty'));
+        qrCards.append(node('p', 'Attendance QR codes are available only for approved or active projects on a scheduled event date.', 'empty'));
     } else if (!dates.length) {
-        qrCards.append(node('p', 'No event dates are scheduled, so check-in QR codes are not available.', 'empty'));
+        qrCards.append(node('p', 'No event dates are scheduled, so attendance QR codes are not available.', 'empty'));
     } else {
         dates.forEach(date => {
             const card = node('article', undefined, 'event-detail-qr-card');
@@ -2304,8 +2820,8 @@ async function renderEventDetails(eventId) {
                 card.append(node(
                     'p',
                     date.event_date > today
-                        ? 'QR check-in becomes available on this scheduled event date.'
-                        : 'This event date has passed. Its check-in QR code is no longer available.',
+                        ? 'Attendance QR scanning becomes available on this scheduled event date.'
+                        : 'This event date has passed. Its attendance QR code is no longer available.',
                     'event-detail-qr-notice'
                 ));
                 qrCards.append(card);
@@ -2317,7 +2833,7 @@ async function renderEventDetails(eventId) {
             request(`/event-dates/${date.id}/qr`).then(result => {
                 const image = node('img');
                 image.src = result.qrImage;
-                image.alt = `Attendance check-in QR code for ${event.title} on ${result.date}`;
+                image.alt = `Attendance QR code for ${event.title} on ${result.date}`;
                 image.className = 'event-detail-qr-image';
                 const download = node('a', 'Download QR image', 'button button-quiet button-small');
                 download.href = result.qrImage;
@@ -2409,7 +2925,7 @@ function renderAdminEventsDashboard(data) {
     searchLabel.append(search);
     const statusLabel = node('label', 'Event status');
     const status = node('select');
-    [['all', 'All statuses'], ['upcoming', 'Upcoming'], ['ongoing', 'Ongoing'], ['completed', 'Completed']].forEach(([value, label]) => status.add(new Option(label, value)));
+    [['all', 'All active statuses'], ['upcoming', 'Upcoming'], ['ongoing', 'Ongoing']].forEach(([value, label]) => status.add(new Option(label, value)));
     statusLabel.append(status);
     const partnerLabel = node('label', 'Partner / Department');
     const partner = node('select');
@@ -2427,6 +2943,8 @@ function renderAdminEventsDashboard(data) {
     eventsPanel.append(toolbar, tableWrap);
     pageContent.append(eventsPanel);
 
+    let eventPage = 1;
+    let pagination;
     const renderRows = () => {
         tbody.replaceChildren();
         const query = search.value.trim().toLocaleLowerCase();
@@ -2444,13 +2962,17 @@ function renderAdminEventsDashboard(data) {
             return matchesText && matchesStatus && matchesPartner;
         });
         if (!filtered.length) {
+            pagination?.remove();
+            pagination = renderPaginatedItems(node('tbody'), [], () => null, 1, () => {}, 'events');
             const row = node('tr');
             const cell = node('td', 'No events match the selected filters.', 'admin-event-empty');
             cell.colSpan = 7;
             row.append(cell);
             tbody.append(row);
+            eventsPanel.append(pagination);
             return;
         }
+        const eventRows = [];
         filtered.forEach(item => {
             const row = node('tr');
             const eventCell = node('td', undefined, 'admin-event-name');
@@ -2512,11 +3034,24 @@ function renderAdminEventsDashboard(data) {
                 event.preventDefault();
                 openRow();
             });
-            tbody.append(row);
+            eventRows.push(row);
         });
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(tbody, eventRows, row => row, eventPage, nextPage => {
+            eventPage = nextPage;
+            renderRows();
+        }, 'events');
+        previousPagination?.remove();
+        eventsPanel.append(pagination);
     };
-    search.addEventListener('input', renderRows);
-    [status, partner].forEach(select => select.addEventListener('change', renderRows));
+    search.addEventListener('input', () => {
+        eventPage = 1;
+        renderRows();
+    });
+    [status, partner].forEach(select => select.addEventListener('change', () => {
+        eventPage = 1;
+        renderRows();
+    }));
     renderRows();
     renderAdminEventCalendar(calendar, data.month, data.calendar);
 }
@@ -2577,7 +3112,7 @@ function renderAdminEventCalendar(container, month, events) {
             eventButton.addEventListener('click', event => {
                 event.stopPropagation();
                 if (item.is_project_proposal) {
-                    showMessage(pageMessage, 'This approved project does not have a scheduled event record yet.');
+                    showMessage(pageMessage, 'This activated project is missing its event record. Use the event list to restore its schedule.');
                     return;
                 }
                 navigateToEvent(Number(item.id)).catch(error => showMessage(pageMessage, error.message, 'error'));
@@ -2603,7 +3138,7 @@ function renderAdminEventCalendar(container, month, events) {
 }
 
 async function renderPartnerEventsDashboard(events) {
-    const calendarSection = panel('Partner calendar', 'Your approved and scheduled events plus public UCC-CES activities available for collaboration.');
+    const calendarSection = panel('Partner calendar', 'Your activated and scheduled events plus public UCC-CES activities available for collaboration.');
     calendarSection.classList.add('partner-calendar-panel');
     const calendar = node('div', undefined, 'partner-calendar');
     calendarSection.append(calendar);
@@ -2717,6 +3252,7 @@ async function showPartnerEventAttendees(eventId) {
     if (!applications.length) {
         section.append(node('div', 'No volunteer applications have been submitted for this event.', 'empty'));
     } else {
+        const records = [];
         applications.forEach(application => {
             const record = node('article', undefined, 'record');
             const info = node('div', undefined, 'record-main');
@@ -2725,17 +3261,19 @@ async function showPartnerEventAttendees(eventId) {
                 node('small', `${application.email} · ${attendanceByApplication.get(Number(application.id)) || 0} date(s) attended`)
             );
             record.append(info, node('span', application.status, `badge status-badge status-${application.status}`));
-            section.append(record);
+            records.push(record);
         });
+        appendPaginatedRecords(section, records, 'volunteers');
     }
     const communitySection = node('section', undefined, 'partner-community-counts');
     communitySection.append(node('h3', 'Community participant counts'));
     if (!participantTotals.length) {
         communitySection.append(node('p', 'No community participant counts have been recorded for this event.', 'empty'));
     } else {
-        participantTotals.forEach(item => {
-            communitySection.append(node('p', `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })} · ${item.participant_group}: ${item.participant_count}`));
-        });
+        const records = participantTotals.map(item => node('div',
+            `${dashboardDate(item.event_date, { month: 'short', day: 'numeric', year: 'numeric' })} · ${item.participant_group}: ${item.participant_count}`,
+            'record'));
+        appendPaginatedRecords(communitySection, records, 'participant groups');
     }
     section.append(communitySection);
     const existing = pageContent.querySelector('.partner-attendee-details');
@@ -2773,7 +3311,8 @@ async function printEventAttendanceReport(eventId) {
             sections.push(`<section><h2>${escapeReportText(date.event_date)}</h2><table><thead><tr><th>Volunteer</th><th>Affiliation</th><th>Attendance status</th><th>Recorded at</th><th>Note</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No approved volunteer attendance records.</td></tr>'}</tbody></table></section>`);
         }
         const safeTitle = escapeReportText(event.title);
-        reportWindow.document.write(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${safeTitle} attendance report</title><style>body{font:14px Arial,sans-serif;color:#183a2a;margin:32px}h1{font-size:22px}h2{font-size:16px;margin-top:28px}p{color:#56675e}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #cddbd1;padding:8px;text-align:left;font-size:12px}th{background:#edf5ef}@media print{body{margin:14mm}}</style></head><body><h1>${safeTitle}</h1><p>${escapeReportText(event.project_title)} · UCC-CES Attendance Report</p>${sections.join('')}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`);
+        const logoUrl = escapeReportText(`${appBasePath}/assets/img/ucc-logo.png`);
+        reportWindow.document.write(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${safeTitle} attendance report</title><style>body{font:14px Arial,sans-serif;color:#183a2a;margin:32px}.report-brand{display:flex;align-items:center;gap:12px}.report-brand img{width:38px;height:46px;object-fit:contain;background:#fff}.report-brand h1{font-size:22px}h2{font-size:16px;margin-top:28px}p{color:#56675e}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #cddbd1;padding:8px;text-align:left;font-size:12px}th{background:#edf5ef}@media print{body{margin:14mm}}</style></head><body><header class="report-brand"><img src="${logoUrl}" alt="University of Caloocan City logo"><h1>${safeTitle}</h1></header><p>${escapeReportText(event.project_title)} · UCC-CES Attendance Report</p>${sections.join('')}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`);
         reportWindow.document.close();
     } catch (error) {
         reportWindow.close();
@@ -2851,6 +3390,8 @@ async function renderAccounts(status = 'pending') {
     const searchFilter = filters.querySelector('[name="search"]');
     const sortFilter = filters.querySelector('[name="sort"]');
     let currentAccounts = [];
+    let accountPage = 1;
+    let pagination;
     statusFilter.value = status;
 
     const renderRecords = accounts => {
@@ -2876,8 +3417,7 @@ async function renderAccounts(status = 'pending') {
             const rightDate = new Date(String(right.created_at).replace(' ', 'T')).getTime();
             return sortFilter.value === 'oldest' ? leftDate - rightDate : rightDate - leftDate;
         });
-        list.replaceChildren();
-        visibleAccounts.forEach(account => {
+        const renderAccount = account => {
             const record = node('article', undefined, 'record account-record');
             const info = node('div', undefined, 'record-main');
             const identity = node('div', undefined, 'account-record-identity');
@@ -3004,8 +3544,15 @@ async function renderAccounts(status = 'pending') {
                     openDetails();
                 }
             });
-            list.append(record);
-        });
+            return record;
+        };
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, visibleAccounts, renderAccount, accountPage, nextPage => {
+            accountPage = nextPage;
+            renderRecords(currentAccounts);
+        }, 'accounts');
+        previousPagination?.replaceWith(pagination);
+        accountPage = Math.min(accountPage, Math.max(1, Math.ceil(visibleAccounts.length / 10)));
         empty.textContent = accounts.length === 0 && statusFilter.value === 'pending'
             ? 'There are no accounts waiting for approval.'
             : 'No accounts match the selected filters.';
@@ -3029,6 +3576,7 @@ async function renderAccounts(status = 'pending') {
                 showMessage(pageMessage, error.message, 'error');
                 return;
             }
+            const confirmationDialog = node('dialog', undefined, 'account-confirmation-modal');
             const confirmation = node('form', undefined, 'account-action-confirmation');
             confirmation.noValidate = status !== 'rejected';
             const message = status === 'approved'
@@ -3051,16 +3599,18 @@ async function renderAccounts(status = 'pending') {
                 confirmation.append(reasonField);
             }
             const actions = node('div', undefined, 'account-confirmation-actions');
-            const cancelButton = button('Cancel', 'cancel-account-confirmation', 'button button-quiet');
+            const cancelButton = button('Cancel', '', 'button button-quiet');
+            cancelButton.type = 'button';
             const confirmButton = node('button', 'Confirm', status === 'rejected' || status === 'disabled' ? 'button button-danger' : 'button button-primary');
             confirmButton.type = 'submit';
             actions.append(cancelButton, confirmButton);
             confirmation.append(actions);
-            detailsContent.querySelector('.account-action-confirmation')?.remove();
-            detailsContent.append(confirmation);
+            confirmationDialog.append(confirmation);
+            section.append(confirmationDialog);
+            confirmationDialog.addEventListener('close', () => confirmationDialog.remove(), { once: true });
+            cancelButton.addEventListener('click', () => confirmationDialog.close());
             confirmation.addEventListener('submit', async submitEvent => {
                 submitEvent.preventDefault();
-                submitEvent.stopPropagation();
                 const activeAccountId = detailsDialog.dataset.accountId;
                 const reason = confirmation.elements.reason?.value.trim() || '';
                 if (!activeAccountId) {
@@ -3080,6 +3630,7 @@ async function renderAccounts(status = 'pending') {
                         method: 'POST',
                         body: JSON.stringify({ status, reason })
                     });
+                    confirmationDialog.close();
                     detailsDialog.close();
                     await renderPage('accounts');
                     showMessage(pageMessage, `Account ${status}.`);
@@ -3089,11 +3640,8 @@ async function renderAccounts(status = 'pending') {
                     confirmButton.disabled = false;
                 }
             });
+            confirmationDialog.showModal();
             if (status === 'rejected') confirmation.querySelector('textarea').focus();
-            return;
-        }
-        if (actionButton.dataset.action === 'cancel-account-confirmation') {
-            actionButton.closest('.account-action-confirmation').remove();
             return;
         }
     });
@@ -3106,6 +3654,7 @@ async function renderAccounts(status = 'pending') {
             const selectedStatus = statusFilter.value;
             const { accounts } = await request(`/accounts${selectedStatus ? `?status=${encodeURIComponent(selectedStatus)}` : ''}`);
             currentAccounts = accounts;
+            accountPage = 1;
             renderRecords(currentAccounts);
         } catch (error) {
             showMessage(pageMessage, error.message, 'error');
@@ -3114,16 +3663,20 @@ async function renderAccounts(status = 'pending') {
         }
     });
     [roleFilter, categoryFilter, affiliationFilter, searchFilter, sortFilter].forEach(control => {
-        control.addEventListener(control === searchFilter || control === affiliationFilter ? 'input' : 'change', () => renderRecords(currentAccounts));
+        control.addEventListener(control === searchFilter || control === affiliationFilter ? 'input' : 'change', () => {
+            accountPage = 1;
+            renderRecords(currentAccounts);
+        });
     });
     renderRecords(currentAccounts);
-    section.append(filters, list, empty, detailsDialog);
+    section.append(filters, list, pagination, empty, detailsDialog);
     pageContent.append(section);
 }
 
 function addReportTable(section, headers, rows, valueForCell) {
     if (!rows.length) {
         section.append(node('div', 'No records match these filters.', 'empty'));
+        section.append(renderPaginatedItems(node('tbody'), [], () => null, 1, () => {}, 'records'));
         return;
     }
     const table = node('table', undefined, 'proposal-table report-table');
@@ -3132,15 +3685,26 @@ function addReportTable(section, headers, rows, valueForCell) {
     headers.forEach(label => headerRow.append(node('th', label)));
     head.append(headerRow);
     const body = node('tbody');
-    rows.forEach(row => {
+    const renderRow = row => {
         const tableRow = node('tr');
         valueForCell(row).forEach(value => tableRow.append(node('td', value ?? '—')));
-        body.append(tableRow);
-    });
+        return tableRow;
+    };
     table.append(head, body);
     const tableWrap = node('div', undefined, 'proposal-table-wrap report-table-wrap');
     tableWrap.append(table);
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        pagination?.remove();
+        pagination = renderPaginatedItems(body, rows, renderRow, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'records');
+        section.append(pagination);
+    };
     section.append(tableWrap);
+    renderRows();
 }
 
 function reportFilterForm() {
@@ -3214,6 +3778,7 @@ async function renderEventHistory() {
         item => [item.original_name, item.project_title, item.document_type, item.description || '—', dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })]);
     if (documents.length) {
         const links = node('div', undefined, 'record-list');
+        const linkRecords = [];
         documents.forEach(item => {
             const record = node('article', undefined, 'record');
             const info = node('div', undefined, 'record-main');
@@ -3227,12 +3792,25 @@ async function renderEventHistory() {
             const actions = node('div', undefined, 'record-actions');
             actions.append(link);
             record.append(info, actions);
-            links.append(record);
+            linkRecords.push(record);
         });
-        files.append(links);
+        let currentPage = 1;
+        let pagination;
+        const renderRows = () => {
+            const previousPagination = pagination;
+            pagination = renderPaginatedItems(links, linkRecords, record => record, currentPage, nextPage => {
+                currentPage = nextPage;
+                renderRows();
+            }, 'files');
+            previousPagination?.replaceWith(pagination);
+        };
+        renderRows();
+        files.append(links, pagination);
     }
     const certificateSection = panel('Certificates issued');
     if (!certificates.length) certificateSection.append(node('div', 'No certificates are available in this archive.', 'empty'));
+    const certificatesList = node('div', undefined, 'record-list');
+    const certificateRecords = [];
     certificates.forEach(item => {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
@@ -3242,13 +3820,25 @@ async function renderEventHistory() {
         const actions = node('div', undefined, 'record-actions');
         actions.append(link);
         record.append(info, actions);
-        certificateSection.append(record);
+        certificateRecords.push(record);
     });
+    let certificatePage = 1;
+    let certificatePagination;
+    const renderCertificates = () => {
+        const previousPagination = certificatePagination;
+        certificatePagination = renderPaginatedItems(certificatesList, certificateRecords, record => record, certificatePage, nextPage => {
+            certificatePage = nextPage;
+            renderCertificates();
+        }, 'certificates');
+        previousPagination?.replaceWith(certificatePagination);
+    };
+    renderCertificates();
+    certificateSection.append(certificatesList, certificatePagination);
     pageContent.append(section, completed, files, certificateSection);
 }
 
 async function renderActivityLogs() {
-    const section = panel('Activity Logs', 'Administrative audit trail for account, proposal, event, and attendance changes. Results are limited to the latest 500 matching records.');
+    const section = panel('Activity Logs', 'Administrative audit trail for account, proposal, event, and attendance changes.');
     const form = node('form', undefined, 'panel-form report-filter-form');
     form.innerHTML = '<label>From<input name="from" type="date"></label><label>To<input name="to" type="date"></label><label>Search<input name="search" type="search" maxlength="120" placeholder="Action, actor, or record"></label><button class="button button-primary" type="submit">Filter logs</button>';
     const output = node('div', undefined, 'activity-log-results');
@@ -3404,7 +3994,7 @@ async function renderReports() {
         if (!rows.length) {
             const empty = node('div', undefined, 'report-empty-state');
             empty.append(node('span', '✓', 'report-empty-icon'), node('strong', 'No matching records'), node('p', 'Try changing the module, date range, or filters.'));
-            results.append(empty);
+            results.append(empty, renderPaginatedItems(node('tbody'), [], () => null, 1, () => {}, 'records'));
             return;
         }
         const columnSets = {
@@ -3427,7 +4017,7 @@ async function renderReports() {
         if (module === 'projects') header.append(node('th', 'Details'));
         head.append(header);
         const body = node('tbody');
-        rows.forEach(item => {
+        const renderRow = item => {
             const row = node('tr');
             columns.forEach(([, getValue]) => row.append(node('td', getValue(item) ?? '—')));
             if (module === 'projects') {
@@ -3435,12 +4025,23 @@ async function renderReports() {
                 actions.append(button('View dossier', `dossier-${item.id}`, 'button button-quiet button-small'));
                 row.append(actions);
             }
-            body.append(row);
-        });
+            return row;
+        };
         table.append(head, body);
         const tableWrap = node('div', undefined, 'proposal-table-wrap report-table-wrap');
         tableWrap.append(table);
         results.append(tableWrap);
+        let reportPage = 1;
+        let pagination;
+        const renderRows = () => {
+            pagination?.remove();
+            pagination = renderPaginatedItems(body, rows, renderRow, reportPage, nextPage => {
+                reportPage = nextPage;
+                renderRows();
+            }, 'records');
+            results.append(pagination);
+        };
+        renderRows();
     };
     let requestSequence = 0;
     let searchTimer = 0;
@@ -3490,7 +4091,10 @@ async function renderReports() {
 async function renderNotifications() {
     const { notifications } = await request('/notifications');
     if (!notifications.length) {
-        pageContent.append(node('div', 'You are all caught up.', 'empty'));
+        const empty = node('section', undefined, 'panel');
+        empty.append(node('div', 'You are all caught up.', 'empty'));
+        empty.append(renderPaginatedItems(node('div'), [], () => null, 1, () => {}, 'notifications'));
+        pageContent.append(empty);
         return;
     }
     const unread = notifications.some(item => !item.read_at);
@@ -3499,15 +4103,27 @@ async function renderNotifications() {
         pageContent.append(markAll);
     }
     const list = node('div', undefined, 'record-list');
+    const records = [];
     notifications.forEach(item => {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
         info.append(node('strong', item.subject), node('small', `${item.message} · ${dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}`));
         record.append(info, node('span', item.read_at ? 'Read' : 'Unread', `badge ${item.read_at ? '' : 'is-unread'}`));
         if (!item.read_at) record.append(button('Mark as read', `notificationread-${item.id}`, 'button button-quiet button-small'));
-        list.append(record);
+        records.push(record);
     });
-    pageContent.append(list);
+    let currentPage = 1;
+    let pagination;
+    const renderRows = () => {
+        const previousPagination = pagination;
+        pagination = renderPaginatedItems(list, records, item => item, currentPage, nextPage => {
+            currentPage = nextPage;
+            renderRows();
+        }, 'notifications');
+        previousPagination?.replaceWith(pagination);
+    };
+    renderRows();
+    pageContent.append(list, pagination);
 }
 
 pageContent.addEventListener('click', async event => {
@@ -3550,9 +4166,13 @@ pageContent.addEventListener('click', async event => {
                 showMessage(pageMessage, 'Add revision feedback before requesting changes.', 'error');
                 return;
             }
-            await request(`/proposals/${proposalId}/review`, { method: 'POST', body: JSON.stringify({ status: decision, notes }) });
-            showMessage(pageMessage, 'Proposal status updated.');
-            await renderPage('proposals');
+            if (decision === 'active') {
+                await confirmProposalActivation(proposalId);
+            } else {
+                await request(`/proposals/${proposalId}/review`, { method: 'POST', body: JSON.stringify({ status: decision, notes }) });
+                await renderPage('proposals');
+                showMessage(pageMessage, 'Proposal status updated.');
+            }
         } else if (action === 'account') {
             await request(`/accounts/${id}/review`, { method: 'POST', body: JSON.stringify({ status: value }) });
             await renderPage('accounts');
@@ -3584,6 +4204,8 @@ pageContent.addEventListener('click', async event => {
             await openDocumentForm(Number(id));
         } else if (action === 'dates') {
             await showDates(Number(id));
+        } else if (action === 'attendance' && id === 'log') {
+            await showEventAttendanceLog(Number(value));
         } else if (action === 'applications') {
             await showApplications(Number(id));
         } else if (action === 'attendees') {
@@ -3601,6 +4223,7 @@ pageContent.addEventListener('click', async event => {
                     applicationId: Number(id),
                     eventDateId: Number(actionButton.dataset.eventDateId),
                     status: value,
+                    verificationStatus: actionButton.dataset.verificationStatus || 'verified',
                     note: actionButton.dataset.note || ''
                 })
             });
@@ -3629,6 +4252,8 @@ pageContent.addEventListener('click', async event => {
             await respondToCollaboration(Number(id), value);
         } else if (action === 'invitepartner') {
             await showInvitePartnerForm(Number(id));
+        } else if (action === 'eventdocupload') {
+            await openPartnerEventDocumentation(Number(id));
         }
     } catch (error) {
         showMessage(pageMessage, error.message, 'error');
@@ -3645,7 +4270,7 @@ function proposalDocumentSlots() {
     return [
         { type: 'signed_proposal_letter', key: 'signed_proposal_letter', title: 'Signed Proposal Letter', required: true, signed: true },
         { type: 'project_brief', key: 'project_brief', title: 'Project Brief Document', required: true, signed: false },
-        { type: 'moa', key: 'signed_moa_mou', title: 'Signed MOA / MOU', required: true, signed: true },
+        { type: 'moa', key: 'signed_moa_mou', title: 'Signed MOA / MOU', required: false, signed: true },
         { type: 'other', key: 'other', title: 'Other Supporting Attachments', required: false, signed: false }
     ];
 }
@@ -3685,7 +4310,7 @@ async function openDocumentForm(proposalId, { focusSlot = null } = {}) {
     heading.append(
         node('p', 'PROPOSAL DOCUMENTS', 'eyebrow'),
         node('h2', 'Upload Proposal Documents'),
-        node('p', 'Attach each required document to this proposal. Signed documents must be marked signed to meet submission requirements.')
+        node('p', 'Attach the required proposal letter and project brief. A signed MOA / MOU may be attached as supporting documentation but is not required for submission or activation.')
     );
     heading.querySelector('h2').id = 'proposal-upload-title';
     const closeButton = button('×', 'close-document-upload', 'button button-quiet button-small proposal-upload-close');
@@ -3975,6 +4600,7 @@ async function openSubmitConfirmation(proposalId) {
 async function showDates(eventId) {
     const { dates } = await request(`/events/${eventId}/dates`);
     const section = panel('Event dates');
+    const records = [];
     for (const date of dates) {
         const row = node('div', undefined, 'record');
         row.append(node('div', dashboardDate(date.event_date, { month: 'long', day: 'numeric', year: 'numeric' }), 'record-main'));
@@ -3987,8 +4613,9 @@ async function showDates(eventId) {
             );
             row.append(actions);
         }
-        section.append(row);
+        records.push(row);
     }
+    appendPaginatedRecords(section, records, 'event dates');
     const existing = pageContent.querySelector('.event-dates');
     existing?.remove();
     section.classList.add('event-dates');
@@ -4014,18 +4641,66 @@ async function showDates(eventId) {
     });
 }
 
+async function showEventAttendanceLog(eventId) {
+    const [{ event }, { dates }] = await Promise.all([
+        request(`/events/${eventId}/details`),
+        request(`/events/${eventId}/dates`)
+    ]);
+    const section = panel(`Attendance log · ${event.title}`, 'Volunteer attendance records for each scheduled event date.');
+    section.classList.add('event-attendance-log');
+    pageContent.querySelector('.event-attendance-log')?.remove();
+    pageContent.prepend(section);
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!dates.length) {
+        section.append(node('div', 'No event dates have been scheduled.', 'empty'));
+        return;
+    }
+    const loading = node('div', 'Loading attendance records…', 'empty');
+    section.append(loading);
+    try {
+        const recordsByDate = await Promise.all(dates.map(async date => ({
+            date,
+            attendance: (await request(`/event-dates/${date.id}/attendance`)).attendance
+        })));
+        loading.remove();
+        for (const { date, attendance } of recordsByDate) {
+            const dateSection = panel(dashboardDate(date.event_date, { month: 'long', day: 'numeric', year: 'numeric' }));
+            addReportTable(
+                dateSection,
+                ['Volunteer', 'Affiliation', 'Attendance status', 'Checked in', 'Checked out', 'Verification', 'Note'],
+                attendance,
+                item => [
+                    `${item.first_name} ${item.last_name}`,
+                    item.affiliation || '—',
+                    item.attendance_status || 'Not recorded',
+                    item.scanned_at ? dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—',
+                    item.checked_out_at ? dashboardDate(item.checked_out_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—',
+                    item.verification_status || 'pending',
+                    item.attendance_note || '—'
+                ]
+            );
+            section.append(dateSection);
+        }
+    } catch (error) {
+        loading.textContent = `Unable to load attendance records: ${error.message}`;
+        loading.classList.add('error');
+        throw error;
+    }
+}
+
 async function showDateAttendance(eventDateId) {
     const { attendance } = await request(`/event-dates/${eventDateId}/attendance`);
     const section = panel('Event-date attendance', 'Only approved applications are listed. Save a status override with an optional note.');
     if (!attendance.length) {
         section.append(node('div', 'No approved volunteers are assigned to this event date.', 'empty'));
     }
+    const records = [];
     attendance.forEach(item => {
         const record = node('article', undefined, 'record');
         const info = node('div', undefined, 'record-main');
         info.append(
             node('strong', `${item.first_name} ${item.last_name}`),
-            node('small', `${item.email} · ${item.affiliation || 'Volunteer'} · ${item.attendance_status || 'Not recorded'}${item.scanned_at ? ` · ${dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}`)
+            node('small', `${item.email} · ${item.affiliation || 'Volunteer'} · ${item.attendance_status || 'Not recorded'} · Verification: ${item.verification_status || 'pending'}${item.scanned_at ? ` · In ${dashboardDate(item.scanned_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}${item.checked_out_at ? ` · Out ${dashboardDate(item.checked_out_at, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}`)
         );
         const controls = node('div', undefined, 'attendance-edit-controls');
         const status = node('select');
@@ -4033,6 +4708,10 @@ async function showDateAttendance(eventDateId) {
         status.add(new Option('Choose status', ''));
         [['present', 'Present'], ['absent', 'Absent'], ['excused', 'Excused']].forEach(([value, label]) => status.add(new Option(label, value)));
         status.value = item.attendance_status || '';
+        const verificationStatus = node('select');
+        verificationStatus.setAttribute('aria-label', `Attendance verification status for ${item.first_name} ${item.last_name}`);
+        [['pending', 'Pending verification'], ['verified', 'Verified']].forEach(([value, label]) => verificationStatus.add(new Option(label, value)));
+        verificationStatus.value = item.verification_status || 'pending';
         const note = node('input');
         note.type = 'text';
         note.maxLength = 500;
@@ -4047,10 +4726,15 @@ async function showDateAttendance(eventDateId) {
             save.disabled = !status.value;
         });
         save.addEventListener('click', () => { save.dataset.note = note.value; });
-        controls.append(status, note, save);
+        verificationStatus.addEventListener('change', () => {
+            save.dataset.verificationStatus = verificationStatus.value;
+        });
+        save.dataset.verificationStatus = verificationStatus.value;
+        controls.append(status, verificationStatus, note, save);
         record.append(info, controls);
-        section.append(record);
+        records.push(record);
     });
+    appendPaginatedRecords(section, records, 'volunteers');
     const existing = pageContent.querySelector('.attendance-panel');
     existing?.remove();
     section.classList.add('attendance-panel');
@@ -4078,7 +4762,8 @@ async function showParticipantCounts(eventDateId) {
     });
     section.append(form);
     if (!participants.length) section.append(node('div', 'No participant totals recorded for this date.', 'empty'));
-    participants.forEach(item => section.append(node('div', `${item.participant_group}: ${item.participant_count}`, 'record')));
+    const records = participants.map(item => node('div', `${item.participant_group}: ${item.participant_count}`, 'record'));
+    appendPaginatedRecords(section, records, 'participant groups');
     const existing = pageContent.querySelector('.participant-panel');
     existing?.remove();
     section.classList.add('participant-panel');
@@ -4089,6 +4774,7 @@ async function showCertificates(eventId) {
     const { certificates } = await request(`/events/${eventId}/certificates`);
     const section = panel(currentUser.role === 'volunteer' ? 'My certificates' : 'Event certificates');
     if (!certificates.length) section.append(node('div', 'No certificates have been issued for this event.', 'empty'));
+    const records = [];
     certificates.forEach(certificate => {
         const record = node('article', undefined, 'record');
         const name = currentUser.role === 'volunteer'
@@ -4097,8 +4783,9 @@ async function showCertificates(eventId) {
         const link = node('a', 'Download certificate', 'button button-quiet button-small');
         link.href = `${API}/certificates/${certificate.id}`;
         record.append(node('span', name, 'record-main'), link);
-        section.append(record);
+        records.push(record);
     });
+    appendPaginatedRecords(section, records, 'certificates');
     if (currentUser.role !== 'volunteer') {
         const form = node('form', undefined, 'panel-form');
         form.innerHTML = '<label>Eligible volunteer<select name="volunteerId" required><option value="">Loading attendees…</option></select></label><label>Certificate file<input name="file" type="file" accept=".pdf,.jpg,.jpeg,.png" required></label><button class="button button-primary" type="submit">Issue certificate</button>';
@@ -4136,6 +4823,7 @@ async function showApplications(eventId, { prepend = true } = {}) {
     const section = panel('Volunteer applications');
     section.classList.add('applications-panel');
     if (!applications.length) section.append(node('div', 'No applications have been submitted.', 'empty'));
+    const records = [];
     applications.forEach(application => {
         const row = node('div', undefined, 'record');
         const info = node('div', undefined, 'record-main');
@@ -4158,8 +4846,9 @@ async function showApplications(eventId, { prepend = true } = {}) {
             actions.append(approve, reject);
             row.append(actions);
         }
-        section.append(row);
+        records.push(row);
     });
+    appendPaginatedRecords(section, records, 'applications');
     const existing = pageContent.querySelector('.applications-panel');
     existing?.remove();
     section.classList.add('applications-panel');
@@ -4169,13 +4858,26 @@ async function showApplications(eventId, { prepend = true } = {}) {
 
 async function showInvitePartnerForm(proposalId) {
     const { partners } = await request('/collaborators/partners');
-    const section = panel(
-        'Invite a collaborator',
-        currentUser.role === 'admin'
-            ? 'Invite an approved partner or create a new approved account that can collaborate immediately.'
-            : 'Invite an approved partner, or create a new account that will become available after CES Admin approval.'
+    const dialog = node('dialog', undefined, 'partner-invite-dialog');
+    const content = node('section', undefined, 'partner-invite-content');
+    const header = node('header', undefined, 'partner-invite-header');
+    const heading = node('div');
+    heading.append(
+        node('span', 'PROPOSAL PARTNERS', 'auth-card-kicker'),
+        node('h2', 'Invite a Partner'),
+        node('p', currentUser.role === 'admin'
+            ? 'Invite an approved partner or create an approved account for immediate collaboration.'
+            : 'Invite an approved partner. New partner accounts require Admin approval.')
     );
+    const close = button('×', 'close-partner-invite', 'button button-quiet volunteer-checkin-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close invitation dialog');
+    header.append(heading, close);
     const form = node('form', undefined, 'panel-form');
+    const notice = node('div', undefined, 'notice');
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    notice.hidden = true;
     form.innerHTML = `
         <label>Partner organization
             <select name="partnerId" required>
@@ -4243,20 +4945,196 @@ async function showInvitePartnerForm(proposalId) {
                     method: 'POST',
                     body: JSON.stringify({ partnerId: form.elements.partnerId.value })
                 });
-            section.remove();
-            showMessage(pageMessage, result.message || 'Collaboration invitation sent.');
-            await renderPage('proposals');
+            dialog.close();
+            dialog.remove();
+            try {
+                await renderPage('proposals');
+                showMessage(pageMessage, result.message || 'Collaboration invitation sent.');
+            } catch (error) {
+                showMessage(pageMessage, `The invitation was sent, but the proposal list could not be refreshed: ${error.message}`, 'error');
+            }
         } catch (error) {
-            showMessage(pageMessage, error.message, 'error');
+            showMessage(notice, error.message, 'error');
         } finally {
             submit.disabled = false;
         }
     });
-    const existing = pageContent.querySelector('.invite-partner-panel');
-    existing?.remove();
-    section.classList.add('invite-partner-panel');
-    section.append(form);
-    pageContent.prepend(section);
+    content.append(header, notice, form);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog || event.target.closest('[data-action="close-partner-invite"]')) dialog.close();
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    pageContent.append(dialog);
+    dialog.showModal();
+}
+
+async function confirmProposalActivation(proposalId) {
+    const formatMoney = value => `₱${Number(value || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`;
+    const dialog = node('dialog', undefined, 'account-confirmation-modal');
+    const content = node('div', undefined, 'account-confirmation-content');
+    const notice = node('div', undefined, 'notice');
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    notice.hidden = true;
+    const heading = node('div', undefined, 'account-confirmation-heading');
+    heading.append(
+        node('span', 'PROPOSAL ACTIVATION', 'auth-card-kicker'),
+        node('h2', 'Activate this proposal?'),
+        node('p', 'Review the proposal and its partner entities before confirming activation.')
+    );
+    const summary = node('div', 'Loading proposal details…', 'activation-proposal-summary');
+    const warning = node('div', undefined, 'activation-irreversible-warning');
+    warning.append(
+        node('strong', 'This action is irreversible.'),
+        node('p', 'Once activated, this proposal cannot be withdrawn or reverted. Activating will automatically convert/migrate this proposal into an official event under Events & Attendance, queued for its scheduled start date.')
+    );
+    const confirmLabel = node('label', undefined, 'activation-confirm-checkbox');
+    const checkbox = node('input');
+    checkbox.type = 'checkbox';
+    checkbox.required = true;
+    confirmLabel.append(checkbox, node('span', 'I understand that this action is permanent and cannot be undone.'));
+    const actions = node('div', undefined, 'account-confirmation-actions');
+    const cancel = node('button', 'Cancel', 'button button-quiet');
+    cancel.type = 'button';
+    const confirm = node('button', 'Activate proposal', 'button button-primary');
+    confirm.type = 'button';
+    confirm.disabled = true;
+    let summaryLoaded = false;
+    actions.append(cancel, confirm);
+    content.append(heading, summary, warning, confirmLabel, notice, actions);
+    dialog.append(content);
+    dialog.addEventListener('click', event => {
+        if (event.target === dialog) dialog.close();
+    });
+    cancel.addEventListener('click', () => dialog.close());
+    checkbox.addEventListener('change', () => {
+        confirm.disabled = !summaryLoaded || !checkbox.checked || confirm.dataset.busy === 'true';
+    });
+    dialog.addEventListener('close', () => dialog.remove(), { once: true });
+    pageContent.append(dialog);
+    dialog.showModal();
+
+    const appendSummaryField = (container, label, value) => {
+        const field = node('div', undefined, 'activation-summary-field');
+        field.append(node('strong', label), node('p', value || 'Not provided'));
+        container.append(field);
+    };
+    const renderSummary = projectData => {
+        const project = projectData.project;
+        summary.replaceChildren();
+        const overview = node('section', undefined, 'activation-summary-section');
+        overview.append(node('h3', 'Project overview'));
+        appendSummaryField(overview, 'Project name', project.title);
+        appendSummaryField(overview, 'Brief description', project.summary);
+        appendSummaryField(overview, 'Project venue / location', project.venue);
+        appendSummaryField(
+            overview,
+            'Scheduled project dates',
+            `${project.periodStart || 'Not scheduled'}${project.periodEnd ? ` to ${project.periodEnd}` : ''}${project.duration ? ` · ${project.duration}` : ''}`
+        );
+        appendSummaryField(
+            overview,
+            'Primary partner',
+            projectData.primaryPartner
+                ? `${projectData.primaryPartner.organization_name} (${projectData.primaryPartner.organization_type})`
+                : 'University of Caloocan City'
+        );
+        const collaborators = node('section', undefined, 'activation-summary-section');
+        collaborators.append(node('h3', 'Collaborators / partner entities'));
+        const partnerNames = new Set();
+        const allPartners = [
+            ...(projectData.primaryPartner ? [{
+                ...projectData.primaryPartner,
+                relationship: 'primary',
+                invitation_status: 'accepted'
+            }] : []),
+            ...(projectData.collaborators || []).filter(partner => partner.relationship !== 'primary')
+        ];
+        if (!allPartners.length && project.proponents?.length) {
+            project.proponents.forEach(name => partnerNames.add(name));
+        }
+        const seenOrganizations = new Set();
+        allPartners.forEach(partner => {
+            if (seenOrganizations.has(partner.organization_name)) return;
+            seenOrganizations.add(partner.organization_name);
+            const label = `${partner.organization_name} · ${partner.relationship} · ${partner.invitation_status}`;
+            partnerNames.add(label);
+        });
+        if (!partnerNames.size) collaborators.append(node('p', 'No partner entities are listed.'));
+        else {
+            const list = node('ul', undefined, 'activation-partner-list');
+            partnerNames.forEach(name => list.append(node('li', name)));
+            collaborators.append(list);
+        }
+        if (project.proponents?.length) {
+            appendSummaryField(collaborators, 'Additional named co-proponents', project.proponents.join(', '));
+        }
+
+        const specifications = node('section', undefined, 'activation-summary-section');
+        specifications.append(node('h3', 'Project specifications'));
+        appendSummaryField(specifications, 'Activity components', (project.activityComponents || []).join('\n'));
+        appendSummaryField(specifications, 'CES classifications', (projectData.classifications || []).join(', '));
+        appendSummaryField(specifications, 'CES categories', (projectData.categories || []).join(', '));
+        appendSummaryField(specifications, 'Justification / objectives', project.justification);
+        appendSummaryField(specifications, 'Target beneficiaries and headcount', project.targetBeneficiaries);
+        appendSummaryField(specifications, 'Target outputs / success indicators', project.targetOutputs);
+        appendSummaryField(specifications, 'Risks and mitigation', project.possibleRisks);
+        appendSummaryField(specifications, 'Expected external partnerships', project.expectedPrivatePartnerships);
+        appendSummaryField(
+            specifications,
+            'Volunteer participation',
+            project.acceptsVolunteers
+                ? `Yes · ${project.volunteerApprovalMode === 'auto' ? 'auto-accept' : 'manual review'}`
+                : 'No'
+        );
+        const budgetItems = project.estimatedCostItems || [];
+        appendSummaryField(
+            specifications,
+            'Estimated budget',
+            budgetItems.length
+                ? `${budgetItems.map(item => `${item.description} (${item.quantity} ${item.unit}) — ${formatMoney(item.subtotal)}`).join('\n')}\nTotal: ${formatMoney(project.totalEstimatedCost)}`
+                : formatMoney(project.totalEstimatedCost)
+        );
+        summary.append(overview, collaborators, specifications);
+    };
+    confirm.addEventListener('click', async () => {
+        if (!checkbox.checked) {
+            showMessage(notice, 'Confirm that you reviewed the details and understand activation cannot be reversed.', 'error');
+            return;
+        }
+        confirm.disabled = true;
+        cancel.disabled = true;
+        confirm.dataset.busy = 'true';
+        confirm.textContent = 'Activating proposal…';
+        try {
+            const result = await request(`/proposals/${proposalId}/review`, {
+                method: 'POST',
+                body: JSON.stringify({ status: 'active', notes: '', permanentConfirmation: checkbox.checked })
+            });
+            dialog.close();
+            try {
+                await renderPage('proposals');
+                showMessage(pageMessage, `Proposal activated and added to Events & Attendance${result.eventId ? ` as event #${result.eventId}` : ''}.`);
+            } catch (error) {
+                showMessage(pageMessage, `Proposal activated${result.eventId ? ` as event #${result.eventId}` : ''}, but the proposal list could not be refreshed: ${error.message}`, 'error');
+            }
+        } catch (error) {
+            showMessage(notice, error.message, 'error');
+            confirm.textContent = 'Activate proposal';
+            confirm.dataset.busy = 'false';
+            confirm.disabled = !checkbox.checked;
+            cancel.disabled = false;
+        }
+    });
+    try {
+        renderSummary(await request(`/proposals/${proposalId}/activation-summary`));
+        summaryLoaded = true;
+        confirm.disabled = !checkbox.checked;
+    } catch (error) {
+        summary.textContent = 'Proposal details could not be loaded.';
+        showMessage(notice, error.message, 'error');
+    }
 }
 
 async function respondToCollaboration(proposalId, response) {
@@ -4318,6 +5196,7 @@ async function showProjectDossier(projectId) {
     const briefGroups = [
         ['Co-Proponents / Partner Entities', (project.proponents || []).join(', ') || 'No co-proponents provided.'],
         ['Program Duration', project.duration || dateRange],
+        ['Project Venue / Location', project.venue || 'Not specified'],
         ['Activity Components', (project.activityComponents || []).join('\n') || 'No activity components provided.'],
         ['Justification / Objectives', project.justification || 'Not provided'],
         ['Target Beneficiaries & Headcount', project.targetBeneficiaries || 'Not provided'],
@@ -4342,7 +5221,7 @@ async function showProjectDossier(projectId) {
         const table = node('table', undefined, 'proposal-table');
         table.innerHTML = '<thead><tr><th>Item</th><th>Unit / Pax</th><th>Quantity</th><th>Unit Cost</th><th>Subtotal</th></tr></thead>';
         const tbody = node('tbody');
-        budgetItems.forEach(item => {
+        const renderBudgetItem = item => {
             const row = node('tr');
             row.append(
                 node('td', item.description),
@@ -4351,12 +5230,24 @@ async function showProjectDossier(projectId) {
                 node('td', `₱${Number(item.cost).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`),
                 node('td', `₱${Number(item.subtotal).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`)
             );
-            tbody.append(row);
-        });
+            return row;
+        };
         table.append(tbody);
         const tableWrap = node('div', undefined, 'proposal-table-wrap');
         tableWrap.append(table);
+        let budgetPage = 1;
+        let pagination;
+        const renderBudget = () => {
+            const previousPagination = pagination;
+            pagination = renderPaginatedItems(tbody, budgetItems, renderBudgetItem, budgetPage, nextPage => {
+                budgetPage = nextPage;
+                renderBudget();
+            }, 'budget items');
+            previousPagination?.replaceWith(pagination);
+        };
         budget.append(tableWrap);
+        renderBudget();
+        budget.append(pagination);
     }
     budget.append(node('p', `Total Estimated Cost: ₱${Number(project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
     brief.append(budget);
@@ -4376,7 +5267,8 @@ async function showProjectDossier(projectId) {
         const subsection = node('div', undefined, 'project-dossier-related-card');
         subsection.append(node('h4', title));
         if (!rows.length) subsection.append(node('p', 'No records yet.'));
-        rows.forEach(text => subsection.append(node('p', text)));
+        const records = rows.map(text => node('p', text, 'project-dossier-related-item'));
+        appendPaginatedRecords(subsection, records, title.toLowerCase());
         relatedGrid.append(subsection);
     }
     related.append(relatedGrid);
@@ -4384,14 +5276,15 @@ async function showProjectDossier(projectId) {
     const documents = node('section', undefined, 'project-dossier-section project-dossier-documents');
     documents.append(node('h3', 'Documentation'));
     if (!data.documents.length) documents.append(node('p', 'No documents attached.'));
-    data.documents.forEach(item => {
+    const documentLinks = data.documents.map(item => {
         const detail = item.description ? ` · ${item.description}` : '';
         const link = node('a', `${item.document_type.replaceAll('_', ' ')} · ${item.original_name}${Number(item.is_signed) ? ' · signed' : ''}${detail}`);
         link.href = `${API}/documents/${item.id}`;
         link.target = '_blank';
         link.rel = 'noopener';
-        documents.append(link);
+        return link;
     });
+    appendPaginatedRecords(documents, documentLinks, 'documents', 'project-dossier-document-list');
     const evaluation = data.evaluation;
     const evaluationSection = node('section', undefined, 'project-dossier-section project-dossier-evaluation');
     evaluationSection.append(node('h3', 'Evaluation'), node('p', `${evaluation.evaluation_count} response(s) · average rating ${evaluation.average_rating ? Number(evaluation.average_rating).toFixed(1) : 'not rated'}/5`));

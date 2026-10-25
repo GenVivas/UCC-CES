@@ -98,6 +98,7 @@ CREATE TABLE proposals (
     owner_user_id BIGINT UNSIGNED NOT NULL,
     title VARCHAR(190) NOT NULL,
     summary TEXT NOT NULL,
+    venue VARCHAR(255) NULL,
     proponents JSON NOT NULL,
     activity_components JSON NOT NULL,
     estimated_cost_items JSON NOT NULL,
@@ -177,6 +178,7 @@ CREATE TABLE events (
     organizer_user_id BIGINT UNSIGNED NOT NULL,
     title VARCHAR(190) NOT NULL,
     description TEXT NULL,
+    venue VARCHAR(255) NULL,
     capacity INT UNSIGNED NOT NULL,
     applications_open_at DATETIME NULL,
     applications_close_at DATETIME NULL,
@@ -245,6 +247,8 @@ CREATE TABLE attendance (
     event_date_id BIGINT UNSIGNED NOT NULL,
     status ENUM('present', 'absent', 'excused') NOT NULL,
     scanned_at DATETIME NULL,
+    checked_out_at DATETIME NULL,
+    verification_status ENUM('pending', 'verified') NOT NULL DEFAULT 'pending',
     marked_by BIGINT UNSIGNED NULL,
     note VARCHAR(500) NULL,
     PRIMARY KEY (id),
@@ -333,6 +337,41 @@ CREATE TABLE volunteer_documentations (
     PRIMARY KEY (id),
     KEY idx_volunteer_documentations_user_created (volunteer_user_id, created_at),
     CONSTRAINT fk_volunteer_documentations_user FOREIGN KEY (volunteer_user_id) REFERENCES volunteer_profiles (user_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE event_documentations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    event_id BIGINT UNSIGNED NOT NULL,
+    uploaded_by BIGINT UNSIGNED NOT NULL,
+    documentation_type ENUM('photo', 'report', 'accomplishment', 'other') NOT NULL,
+    relative_path VARCHAR(500) NOT NULL,
+    original_name VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(120) NOT NULL,
+    file_size INT UNSIGNED NOT NULL,
+    description VARCHAR(500) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_event_documentations_event_created (event_id, created_at),
+    KEY idx_event_documentations_uploader_created (uploaded_by, created_at),
+    CONSTRAINT fk_event_documentations_event FOREIGN KEY (event_id) REFERENCES events (id) ON DELETE CASCADE,
+    CONSTRAINT fk_event_documentations_uploader FOREIGN KEY (uploaded_by) REFERENCES users (id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE password_reset_otps (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    email VARCHAR(190) NOT NULL,
+    request_ip_hash CHAR(64) NOT NULL,
+    code_hash VARCHAR(255) NULL,
+    expires_at DATETIME NOT NULL,
+    attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    verified_at DATETIME NULL,
+    reset_token_hash CHAR(64) NULL,
+    reset_expires_at DATETIME NULL,
+    consumed_at DATETIME NULL,
+    requested_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_password_reset_email_requested (email, requested_at),
+    KEY idx_password_reset_ip_requested (request_ip_hash, requested_at)
 ) ENGINE=InnoDB;
 
 CREATE TABLE notifications (

@@ -22,7 +22,7 @@ button { cursor: pointer; }
 [hidden] { display: none !important; }
 .topbar { height: 78px; padding: 0 clamp(20px, 5vw, 72px); background: var(--paper); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; gap: 12px; color: var(--ink); text-decoration: none; }
-.brand-mark { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; background: var(--green-dark); color: white; font-family: Manrope, sans-serif; font-weight: 800; font-size: 12px; letter-spacing: .04em; }
+.brand-mark { width: 40px; height: 48px; display: block; flex: 0 0 auto; padding: 2px; border: 1px solid #ffffff55; border-radius: 8px; background: #fff; object-fit: contain; }
 .brand strong, .brand small { display: block; }
 .brand strong { font: 800 16px Manrope, sans-serif; letter-spacing: .02em; }
 .brand small { color: var(--muted); font-size: 11px; margin-top: 2px; }
@@ -90,6 +90,11 @@ input[type="file"] { padding: 8px; font-size: 12px; }
 .collaborator-account-fields legend { padding: 0 7px; color: #315a40; font-size: 12px; font-weight: 700; }
 .invite-partner-panel [data-collaborator-submit] { grid-column: 1 / -1; justify-self: start; }
 .record-list { display: grid; gap: 10px; }
+.pagination-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+.pagination-count { margin-right: auto; color: var(--muted); font-size: 11px; }
+.pagination-page-numbers { display: flex; flex-wrap: wrap; gap: 5px; }
+.pagination-ellipsis { padding: 6px 2px; color: var(--muted); font-size: 11px; }
+.pagination-controls [aria-current="page"] { color: #fff; border-color: var(--green); background: var(--green); }
 .record { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
 .record-main { min-width: 0; }
 .record-main strong, .record-main small { display: block; }
@@ -185,12 +190,7 @@ body.auth-entry {
 .auth-entry .brand { gap: 12px; color: #f5fff8; }
 .auth-entry .brand-mark {
     width: 35px;
-    height: 35px;
-    border: 1px solid #ffffff55;
-    border-radius: 7px;
-    background: #ffffff12;
-    color: #d9fbe4;
-    font-size: 10px;
+    height: 42px;
 }
 .auth-entry .brand-copy { display: flex; align-items: center; gap: 14px; }
 .auth-entry .brand strong { font-size: 14px; font-weight: 600; }
@@ -226,44 +226,16 @@ body.auth-entry {
     margin-bottom: 25px;
 }
 .crest-mark {
-    position: relative;
     width: 88px;
     height: 94px;
-    display: grid;
-    place-items: center;
     flex: 0 0 auto;
-    overflow: hidden;
+    display: block;
+    padding: 5px;
+    object-fit: contain;
     border: 1px solid #ffffff66;
-    border-radius: 22px 22px 27px 27px;
-    background: linear-gradient(145deg, #f9fff9, #c5ebd2);
-    box-shadow: 0 8px 28px #001e1533, inset 0 0 0 5px #ffffffaa;
-    transform: rotate(-2deg);
-}
-.crest-mark::before, .crest-mark::after {
-    position: absolute;
-    width: 1px;
-    height: 48px;
-    background: #18724755;
-    content: "";
-}
-.crest-mark::before { transform: rotate(45deg); }
-.crest-mark::after { transform: rotate(-45deg); }
-.crest-mark span {
-    position: relative;
-    z-index: 1;
-    padding: 6px 5px;
-    border: 1px solid #19784c;
-    border-radius: 5px;
+    border-radius: 18px;
     background: #fff;
-    color: #12603d;
-    font: 800 15px Manrope, sans-serif;
-    letter-spacing: .05em;
-}
-.crest-mark i {
-    position: absolute;
-    inset: auto 0 0;
-    height: 23px;
-    background: #17804b;
+    box-shadow: 0 8px 28px #001e1533, inset 0 0 0 5px #ffffffaa;
 }
 .auth-entry .intro-identity .eyebrow {
     max-width: 150px;
@@ -374,6 +346,8 @@ body.auth-entry {
     font-size: 10px;
     font-weight: 400;
 }
+.forgot-password-button { justify-self: end; min-height: 30px; padding: 3px 7px; border: 0; color: #28704b; font-size: 11px; }
+.forgot-password-button:hover { background: #edf7ef; }
 .security-icon { color: #16824c; font-weight: 800; }
 .auth-entry .site-footer {
     padding: 15px 20px;
@@ -409,9 +383,7 @@ body.auth-entry {
     .auth-entry .auth-layout { grid-template-columns: minmax(0, 1fr); gap: 25px; padding: 34px 0; }
     .auth-entry .intro { max-width: 620px; }
     .intro-identity { margin-bottom: 16px; }
-    .crest-mark { width: 60px; height: 64px; border-radius: 16px; }
-    .crest-mark span { font-size: 12px; }
-    .crest-mark i { height: 16px; }
+    .crest-mark { width: 60px; height: 64px; border-radius: 12px; }
     .auth-entry .intro h1 { font-size: clamp(34px, 7vw, 46px); }
     .intro-subtitle { margin-top: 7px; }
     .intro-highlights { max-width: 500px; margin-top: 18px; }
@@ -827,7 +799,7 @@ body.app-entry .topbar {
     box-shadow: 0 2px 10px #001b1020;
 }
 body.app-entry .brand { color: #f5fff8; }
-body.app-entry .brand-mark { border: 1px solid #ffffff55; border-radius: 8px; background: #ffffff12; color: #d9fbe4; }
+body.app-entry .brand-mark { border: 1px solid #ffffff55; border-radius: 8px; background: #fff; }
 body.app-entry .brand small { color: #72dfa2; }
 body.app-entry .top-actions .user-label { color: #c4e2ce; }
 body.app-entry .top-actions .button-quiet { border-color: #ffffff3a; color: #f5fff8; }
@@ -987,6 +959,26 @@ body.app-entry .site-footer { display: none; }
     box-shadow: 0 24px 70px #06281738;
 }
 .account-details-modal::backdrop { background: #10251bcc; backdrop-filter: blur(3px); }
+.account-confirmation-modal, .partner-invite-dialog {
+    width: min(620px, calc(100% - 28px));
+    max-width: 620px;
+    max-height: min(90vh, 820px);
+    padding: 0;
+    overflow: auto;
+    border: 1px solid #dce8df;
+    border-radius: 16px;
+    background: #fff;
+    color: var(--ink);
+    box-shadow: 0 24px 70px #06281738;
+}
+.account-confirmation-modal::backdrop, .partner-invite-dialog::backdrop { background: #10251bcc; backdrop-filter: blur(4px); }
+.account-confirmation-modal > .account-action-confirmation { margin: 22px; }
+.partner-invite-content { display: grid; gap: 18px; padding: clamp(18px, 4vw, 26px); }
+.partner-invite-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.partner-invite-header h2 { margin: 0; color: #173f31; font: 700 21px Manrope, "Segoe UI", sans-serif; }
+.partner-invite-header p { margin: 7px 0 0; color: #718078; font-size: 12px; line-height: 1.55; }
+.partner-invite-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; }
+.forgot-password-dialog .panel-form { gap: 14px; }
 .account-details-content { display: grid; gap: 20px; padding: 24px; }
 .account-details-header, .account-proof-heading, .account-details-actions, .account-confirmation-actions {
     display: flex;
@@ -1013,6 +1005,28 @@ body.app-entry .site-footer { display: none; }
 .account-action-confirmation label { display: grid; gap: 6px; color: #42544b; font-size: 11px; font-weight: 600; }
 .account-action-confirmation textarea { width: 100%; min-height: 86px; resize: vertical; border: 1px solid #dce8df; border-radius: 8px; padding: 9px 10px; font: inherit; }
 .account-confirmation-actions { justify-content: flex-end; }
+.account-confirmation-content { display: grid; gap: 16px; padding: clamp(20px, 4vw, 28px); }
+.account-confirmation-heading { display: grid; gap: 7px; }
+.account-confirmation-heading .auth-card-kicker { margin: 0; color: #38754f; }
+.account-confirmation-heading h2 { margin: 0; color: #173f31; font: 700 22px Manrope, "Segoe UI", sans-serif; }
+.account-confirmation-heading p { margin: 0; color: #53665b; font-size: 13px; line-height: 1.55; }
+.activation-proposal-summary { display: grid; gap: 12px; max-height: min(38vh, 340px); overflow: auto; padding: 2px 4px 2px 0; }
+.activation-summary-section { display: grid; gap: 9px; padding: 14px; border: 1px solid #e0ebe3; border-radius: 11px; background: #fbfdfb; }
+.activation-summary-section h3 { margin: 0; color: #214c35; font: 700 14px Manrope, "Segoe UI", sans-serif; }
+.activation-summary-field { display: grid; gap: 3px; }
+.activation-summary-field strong { color: #63746a; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.activation-summary-field p, .activation-partner-list { margin: 0; color: #2c4035; font-size: 12px; line-height: 1.55; white-space: pre-line; overflow-wrap: anywhere; }
+.activation-partner-list { padding-left: 20px; }
+.activation-irreversible-warning { padding: 13px 15px; border: 1px solid #efc9a7; border-radius: 10px; background: #fff7ed; color: #7a3e18; }
+.activation-irreversible-warning strong { display: block; font-size: 13px; }
+.activation-irreversible-warning p { margin: 5px 0 0; font-size: 12px; line-height: 1.55; }
+.activation-confirm-checkbox { display: flex; align-items: flex-start; gap: 10px; color: #354c3e; font-size: 12px; font-weight: 650; line-height: 1.5; }
+.activation-confirm-checkbox input { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; accent-color: #087c45; }
+.partner-documentation-event { align-items: flex-start; flex-wrap: wrap; }
+.partner-event-documentation-list { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 8px; padding-left: 10px; }
+.partner-event-documentation-link { color: #28613c; font-size: 11px; font-weight: 650; text-decoration: none; }
+.partner-event-documentation-link:hover { text-decoration: underline; }
+.partner-documentation-empty { padding-left: 10px; color: var(--muted); font-size: 10px; }
 .applications-panel > .record, .attendance-panel > .record { align-items: center; }
 .status-approved, .status-present { background: #e7f5eb; color: #21643b; }
 .status-rejected, .status-disabled, .status-absent { background: #fff0ef; color: #963630; }
@@ -1101,7 +1115,7 @@ body.password-change-entry .workspace { margin-left: 0; }
 @media (max-width: 620px) {
     body.app-entry .topbar { left: 0; height: 64px; padding: 0 10px; }
     body.app-entry .topbar .brand { min-width: 0; gap: 8px; }
-    body.app-entry .brand-mark { width: 34px; height: 34px; }
+    body.app-entry .brand-mark { width: 30px; height: 36px; }
     body.app-entry .brand strong { font-size: 12px; }
     body.app-entry .brand small { display: none; }
     body.app-entry .top-actions { gap: 6px; }
