@@ -1339,29 +1339,37 @@ async function renderProposals() {
     filters.innerHTML = '<label>Search<input name="search" type="search" placeholder="Search title or proponent"></label><label>Status<select name="status"><option value="">All statuses</option><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under review</option><option value="revision">Needs revision</option><option value="approved">Approved</option><option value="active">Activated</option><option value="rejected">Rejected</option></select></label>';
     const tableWrap = node('div', undefined, 'proposal-table-wrap');
     const table = node('table', undefined, 'proposal-table');
-    table.innerHTML = '<thead><tr><th scope="col">Proposal Title</th><th scope="col">Proponent</th><th scope="col">Expected Private / External Partnerships</th><th scope="col">Project Dates &amp; Time</th><th scope="col">Updated</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th scope="col">Proposal Title</th><th scope="col">Status</th><th scope="col">Proponent</th><th scope="col">Co-Proponents / Partner Organizations</th><th scope="col">Project Dates</th><th scope="col">Updated</th></tr></thead>';
     const body = node('tbody');
     const proposalRows = [];
     proposals.forEach(proposal => {
         const row = node('tr');
         row.dataset.status = proposal.status;
         row.dataset.proposalId = String(proposal.id);
-        row.dataset.search = `${proposal.title} ${proposal.organization_name || ''} ${proposal.first_name} ${proposal.last_name}`.toLocaleLowerCase();
+        row.dataset.search = `${proposal.title} ${proposal.organization_name || ''} ${proposal.proposer_name || ''} ${proposal.first_name} ${proposal.last_name}`.toLocaleLowerCase();
         row.tabIndex = 0;
         row.setAttribute('role', 'link');
         row.setAttribute('aria-label', `Open proposal details for ${proposal.title}`);
         const titleCell = node('td', undefined, 'proposal-title-cell');
         titleCell.append(node('strong', proposal.title));
+        const statusCell = node('td');
+        statusCell.append(node(
+            'span',
+            proposalStatusLabel(proposal.status),
+            `badge proposal-status status-${proposal.status}`
+        ));
         const proponentCell = node('td', undefined, 'proposal-proponent-cell');
         proponentCell.append(node('strong', proposal.organization_name || `${proposal.first_name} ${proposal.last_name}`));
-        if (proposal.organization_name) proponentCell.append(node('small', `${proposal.first_name} ${proposal.last_name}`));
-        const partnershipsCell = node('td', proposal.expected_private_partnerships || 'Not specified', 'proposal-partnership-cell');
+        proponentCell.append(node('small', proposal.proposer_name || `${proposal.first_name} ${proposal.last_name}`));
+        const partnershipNames = proposalOrganizationNames(proposal.proponents);
+        if (proposal.expected_private_partnerships) partnershipNames.push(`Historical note: ${proposal.expected_private_partnerships}`);
+        const partnershipsCell = node('td', partnershipNames.join(', ') || 'Not specified', 'proposal-partnership-cell');
         const projectDates = proposal.period_start
-            ? `${dashboardDate(proposal.period_start, { month: 'short', day: 'numeric', year: 'numeric' })}${proposal.period_end ? ` – ${dashboardDate(proposal.period_end, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}${proposal.scheduled_time ? ` · ${proposal.scheduled_time}` : ''}${proposal.stated_duration ? ` · ${proposal.stated_duration}` : ''}`
+            ? `${dashboardDate(proposal.period_start, { month: 'short', day: 'numeric', year: 'numeric' })}${proposal.period_end ? ` – ${dashboardDate(proposal.period_end, { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}${proposal.stated_duration ? ` · ${proposal.stated_duration}` : ''}`
             : 'Not scheduled';
         const datesCell = node('td', projectDates);
         const updatedCell = node('td', dashboardDate(proposal.updated_at, { month: 'short', day: 'numeric', year: 'numeric' }));
-        row.append(titleCell, proponentCell, partnershipsCell, datesCell, updatedCell);
+        row.append(titleCell, statusCell, proponentCell, partnershipsCell, datesCell, updatedCell);
         proposalRows.push(row);
     });
     table.append(body);
@@ -1411,6 +1419,18 @@ async function renderProposals() {
     renderProposalRows();
 }
 
+function proposalStatusLabel(status) {
+    return ({
+        draft: 'Draft',
+        submitted: 'Submitted',
+        under_review: 'Under review',
+        revision: 'Revision requested',
+        approved: 'Approved',
+        active: 'Active',
+        rejected: 'Rejected'
+    })[status] || String(status || 'Unknown').replaceAll('_', ' ');
+}
+
 async function openAdminProposalForm() {
     const [{ categories }, { partners }] = await Promise.all([
         request('/categories'),
@@ -1445,7 +1465,8 @@ function createProposalWizard(categories, partners, proposal = null) {
             <label>Project Name<input name="title" maxlength="190" required></label>
             <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
             <label class="wide">Project Venue / Location<input name="venue" maxlength="255" placeholder="Enter a venue or leave blank if it is still to be determined"></label>
-            <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Entities</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add proponent</button></div><div data-proponents-list></div></div>
+            <label class="wide">Proposer Full Name<input name="proposerName" maxlength="190" autocomplete="name" required></label>
+            <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Organizations</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add organization</button></div><p class="field-hint">Select UCC campuses or an approved/pending partner organization. Add multiple organizations as needed.</p><div data-proponents-list></div></div>
             <label>Program Start Date<input name="periodStart" type="date" required></label>
             <label>Program End Date<input name="periodEnd" type="date" required></label>
             <label class="wide">Program Duration / Term<input name="duration" maxlength="100" placeholder="Optional, e.g. 2-day program or 3 months"></label>
@@ -1473,7 +1494,7 @@ function createProposalWizard(categories, partners, proposal = null) {
             <label class="wide">Target Beneficiaries &amp; Headcount<textarea name="targetBeneficiaries" rows="3" maxlength="10000" placeholder="Identify beneficiary groups and estimated headcount." required></textarea></label>
             <label class="wide">Target Outputs / Success Indicators<textarea name="targetOutputs" rows="3" maxlength="10000" placeholder="List measurable outputs or indicators of success." required></textarea></label>
             <label class="wide">Possible Risks &amp; Mitigation Plan<textarea name="possibleRisks" rows="3" maxlength="10000" placeholder="Describe possible risks and how they will be mitigated." required></textarea></label>
-            <label class="wide">Expected Private / External Partner Involvement<textarea name="expectedPrivatePartnerships" rows="2" maxlength="10000" placeholder="Optional"></textarea></label>
+            <div class="wide field-hint proposal-legacy-partnership-note" data-legacy-partnership-note hidden></div>
             <fieldset class="wide choice-group proposal-choice-group"><legend>Project Classification (choose at least one)</legend><div data-classification-options></div></fieldset>
             <fieldset class="wide choice-group proposal-choice-group"><legend>CES Category (choose at least one)</legend><div data-category-options></div></fieldset>
         </section>
@@ -1511,6 +1532,7 @@ function createProposalWizard(categories, partners, proposal = null) {
     });
 
     form.elements.title.value = proposal?.title || '';
+    form.elements.proposerName.value = proposal?.proposerName || (currentUser.role === 'partner' ? `${currentUser.firstName} ${currentUser.lastName}` : '');
     form.elements.summary.value = proposal?.summary || '';
     form.elements.venue.value = proposal?.venue || '';
     form.elements.acceptsVolunteers.checked = proposal?.acceptsVolunteers ?? true;
@@ -1527,7 +1549,11 @@ function createProposalWizard(categories, partners, proposal = null) {
     form.elements.targetBeneficiaries.value = proposal?.targetBeneficiaries || '';
     form.elements.targetOutputs.value = proposal?.targetOutputs || '';
     form.elements.possibleRisks.value = proposal?.possibleRisks || '';
-    form.elements.expectedPrivatePartnerships.value = proposal?.expectedPrivatePartnerships || '';
+    const legacyPartnershipNote = form.querySelector('[data-legacy-partnership-note]');
+    if (proposal?.expectedPrivatePartnerships) {
+        legacyPartnershipNote.textContent = `Existing partnership note (read-only): ${proposal.expectedPrivatePartnerships}`;
+        legacyPartnershipNote.hidden = false;
+    }
     (proposal?.proponents?.length ? proposal.proponents : ['']).forEach(value => addProposalPartnerRow(form, partners, value));
     (proposal?.activityComponents?.length ? proposal.activityComponents : ['']).forEach(value => addProposalTextRow(form, 'activities', value));
     (proposal?.estimatedCostItems?.length ? proposal.estimatedCostItems : [{}]).forEach(value => addProposalBudgetRow(form, value));
@@ -1623,20 +1649,30 @@ function addProposalPartnerRow(form, partners, selectedName = '') {
     select.required = true;
     select.setAttribute('aria-label', 'Co-proponent or partner entity');
     select.dataset.partnerSelector = '';
-    select.add(new Option('Choose an approved partner entity', ''));
+    select.add(new Option('Choose an organization', ''));
+    [
+        'University of Caloocan City - Main',
+        'University of Caloocan City - North',
+        'University of Caloocan City - South',
+        'City Government of Caloocan City',
+    ].forEach((organization, index) => {
+        const option = new Option(organization, `core:${index}`);
+        option.dataset.partnerName = organization;
+        select.add(option);
+    });
     partners.forEach(partner => {
         const option = new Option(partner.organization_name, partner.id);
         option.dataset.partnerName = partner.organization_name;
         select.add(option);
     });
-    if (selectedName && !partners.some(partner => partner.organization_name === selectedName)) {
+    if (selectedName && !Array.from(select.options).some(option => option.dataset.partnerName === selectedName)) {
         const legacy = new Option(`${selectedName} (existing entry)`, `legacy:${selectedName}`);
         legacy.dataset.partnerName = selectedName;
         select.add(legacy);
     }
     select.add(new Option('+ Create New Partner Account', 'new'));
-    const selected = partners.find(partner => partner.organization_name === selectedName);
-    select.value = selected ? String(selected.id) : (selectedName ? `legacy:${selectedName}` : '');
+    const selected = Array.from(select.options).find(option => option.dataset.partnerName === selectedName);
+    select.value = selected ? selected.value : (selectedName ? `legacy:${selectedName}` : '');
     select.dataset.previousValue = select.value;
     row.append(select, proposalRemoveButton());
     const list = form.querySelector('[data-proponents-list]');
@@ -1817,6 +1853,7 @@ function serializeProposalWizard(form) {
     const formData = new FormData(form);
     const data = Object.fromEntries(formData);
     if (form.elements.ownerUserId) data.ownerUserId = form.elements.ownerUserId.value;
+    data.proposerName = form.elements.proposerName.value.trim();
     data.acceptsVolunteers = form.elements.acceptsVolunteers.checked;
     data.volunteerApprovalMode = form.elements.volunteerApprovalMode.value;
     data.venue = form.elements.venue.value.trim();
@@ -1833,6 +1870,18 @@ function serializeProposalWizard(form) {
     data.classifications = formData.getAll('classifications');
     data.categoryIds = formData.getAll('categoryIds');
     return data;
+}
+
+function proposalOrganizationNames(value) {
+    if (Array.isArray(value)) return value.filter(name => typeof name === 'string');
+    if (typeof value !== 'string' || !value) return [];
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed.filter(name => typeof name === 'string') : [];
+    } catch (error) {
+        console.error('Proposal organization list is invalid JSON.', error);
+        return [];
+    }
 }
 
 function validateCompleteProposalWizard(form) {
@@ -5058,6 +5107,7 @@ async function confirmProposalActivation(proposalId) {
         const overview = node('section', undefined, 'activation-summary-section');
         overview.append(node('h3', 'Project overview'));
         appendSummaryField(overview, 'Project name', project.title);
+        appendSummaryField(overview, 'Proposed by', project.proposerName);
         appendSummaryField(overview, 'Brief description', project.summary);
         appendSummaryField(overview, 'Project venue / location', project.venue);
         appendSummaryField(
@@ -5083,9 +5133,7 @@ async function confirmProposalActivation(proposalId) {
             }] : []),
             ...(projectData.collaborators || []).filter(partner => partner.relationship !== 'primary')
         ];
-        if (!allPartners.length && project.proponents?.length) {
-            project.proponents.forEach(name => partnerNames.add(name));
-        }
+        (project.proponents || []).forEach(name => partnerNames.add(name));
         const seenOrganizations = new Set();
         allPartners.forEach(partner => {
             if (seenOrganizations.has(partner.organization_name)) return;
@@ -5099,8 +5147,8 @@ async function confirmProposalActivation(proposalId) {
             partnerNames.forEach(name => list.append(node('li', name)));
             collaborators.append(list);
         }
-        if (project.proponents?.length) {
-            appendSummaryField(collaborators, 'Additional named co-proponents', project.proponents.join(', '));
+        if (project.expectedPrivatePartnerships) {
+            appendSummaryField(collaborators, 'Historical partnership note', project.expectedPrivatePartnerships);
         }
 
         const specifications = node('section', undefined, 'activation-summary-section');
@@ -5112,7 +5160,6 @@ async function confirmProposalActivation(proposalId) {
         appendSummaryField(specifications, 'Target beneficiaries and headcount', project.targetBeneficiaries);
         appendSummaryField(specifications, 'Target outputs / success indicators', project.targetOutputs);
         appendSummaryField(specifications, 'Risks and mitigation', project.possibleRisks);
-        appendSummaryField(specifications, 'Expected external partnerships', project.expectedPrivatePartnerships);
         appendSummaryField(
             specifications,
             'Volunteer participation',
@@ -5274,7 +5321,8 @@ async function renderProposalDetails(projectId) {
     brief.append(node('h3', 'Project Brief'));
     const briefGroups = [
         ['Proponent', data.owner?.organization_name || `${data.owner?.first_name || ''} ${data.owner?.last_name || ''}`.trim() || 'Not available'],
-        ['Co-Proponents / Partner Entities', (project.proponents || []).join(', ') || 'No co-proponents provided.'],
+        ['Proposed by', project.proposerName || 'Not provided'],
+        ['Co-Proponents / Partner Organizations', [...(project.proponents || []), ...(project.expectedPrivatePartnerships ? [`Historical partnership note: ${project.expectedPrivatePartnerships}`] : [])].join(', ') || 'No partner organizations provided.'],
         ['Program Duration', project.duration || dateRange],
         ['Project Venue / Location', project.venue || 'Not specified'],
         ['Activity Components', (project.activityComponents || []).join('\n') || 'No activity components provided.'],
@@ -5282,7 +5330,6 @@ async function renderProposalDetails(projectId) {
         ['Target Beneficiaries & Headcount', project.targetBeneficiaries || 'Not provided'],
         ['Target Outputs / Success Indicators', project.targetOutputs || 'Not provided'],
         ['Possible Risks & Mitigation Plan', project.possibleRisks || 'Not provided'],
-        ['Expected Private / External Partnerships', project.expectedPrivatePartnerships || 'Not provided'],
         ['Volunteer Engagement', project.acceptsVolunteers ? `Yes · ${project.volunteerApprovalMode === 'auto' ? 'Auto Accept' : 'Manual Review'}` : 'No'],
         ['Project Classifications', (data.classifications || []).join(', ') || 'Not specified'],
         ['CES Categories', (data.categories || []).join(', ') || 'Not specified']
@@ -5335,43 +5382,6 @@ async function renderProposalDetails(projectId) {
     budget.append(node('p', `Total Estimated Cost: ₱${Number(project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
     brief.append(budget);
     body.append(brief);
-
-    const groups = [
-        ['Partners', data.partners.map(item => `${item.organization_name} (${item.relationship})`)],
-        ['Schedule', data.schedules.map(item => `${item.event_date} · ${item.event_title} / ${item.activity_title} · ${item.start_time}–${item.end_time} · ${item.venue}`)],
-        ['Attendance', data.attendance.map(item => `${item.event_date} · ${item.event_title}: ${item.present} present, ${item.absent} absent, ${item.excused} excused of ${item.approved_volunteers} approved`)],
-        ['Volunteers', data.volunteers.map(item => `${item.first_name} ${item.last_name} · ${item.volunteer_type} · ${item.event_title} · ${item.application_status}`)],
-        ['Participants', data.participants.map(item => `${item.event_date} · ${item.event_title} · ${item.participant_group}: ${item.participant_count}`)]
-    ];
-    const related = node('section', undefined, 'project-dossier-section project-dossier-related');
-    related.append(node('h3', 'Related Activity'));
-    const relatedGrid = node('div', undefined, 'project-dossier-related-grid');
-    for (const [title, rows] of groups) {
-        const subsection = node('div', undefined, 'project-dossier-related-card');
-        subsection.append(node('h4', title));
-        if (!rows.length) subsection.append(node('p', 'No records yet.'));
-        const records = rows.map(text => node('p', text, 'project-dossier-related-item'));
-        appendPaginatedRecords(subsection, records, title.toLowerCase());
-        relatedGrid.append(subsection);
-    }
-    related.append(relatedGrid);
-
-    const documents = node('section', undefined, 'project-dossier-section project-dossier-documents');
-    documents.append(node('h3', 'Documentation'));
-    if (!data.documents.length) documents.append(node('p', 'No documents attached.'));
-    const documentLinks = data.documents.map(item => {
-        const detail = item.description ? ` · ${item.description}` : '';
-        const link = node('a', `${item.document_type.replaceAll('_', ' ')} · ${item.original_name}${Number(item.is_signed) ? ' · signed' : ''}${detail}`);
-        link.href = `${API}/documents/${item.id}`;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        return link;
-    });
-    appendPaginatedRecords(documents, documentLinks, 'documents', 'project-dossier-document-list');
-    const evaluation = data.evaluation;
-    const evaluationSection = node('section', undefined, 'project-dossier-section project-dossier-evaluation');
-    evaluationSection.append(node('h3', 'Evaluation'), node('p', `${evaluation.evaluation_count} response(s) · average rating ${evaluation.average_rating ? Number(evaluation.average_rating).toFixed(1) : 'not rated'}/5`));
-    body.append(related, documents, evaluationSection);
 
     const footer = node('footer', undefined, 'project-dossier-footer');
     const download = node('a', 'Download / Print PDF', 'button button-primary');

@@ -7,6 +7,7 @@ CREATE TABLE users (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     email VARCHAR(190) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    session_version INT UNSIGNED NOT NULL DEFAULT 0,
     password_change_required TINYINT(1) NOT NULL DEFAULT 0,
     role ENUM('admin', 'partner', 'volunteer') NOT NULL,
     account_status ENUM('pending', 'approved', 'rejected', 'disabled') NOT NULL DEFAULT 'pending',
@@ -96,6 +97,7 @@ INSERT IGNORE INTO categories (name) VALUES
 CREATE TABLE proposals (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     owner_user_id BIGINT UNSIGNED NOT NULL,
+    proposer_name VARCHAR(190) NOT NULL,
     title VARCHAR(190) NOT NULL,
     summary TEXT NOT NULL,
     venue VARCHAR(255) NULL,

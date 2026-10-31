@@ -97,6 +97,7 @@ final class ApiController
         }
         if ($path === '/logout' && $method === 'POST') {
             unset($_SESSION['user']);
+            unset($_SESSION['auth_version']);
             session_regenerate_id(true);
             $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
             Http::json(['message' => 'You have been signed out.', 'csrfToken' => $_SESSION['csrf_token']]);
@@ -467,6 +468,7 @@ final class ApiController
         session_regenerate_id(true);
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         $_SESSION['user'] = $this->publicUser($user);
+        $_SESSION['auth_version'] = (int) $user['session_version'];
         $this->logActivity('auth.login', 'user', (int) $user['id']);
         Http::json(['user' => $_SESSION['user'], 'csrfToken' => $_SESSION['csrf_token']]);
     }
@@ -603,7 +605,7 @@ final class ApiController
                 throw new RuntimeException('The password reset session is invalid or expired.', 400);
             }
             $account = $this->db->prepare(
-                "UPDATE users SET password_hash = ?
+                "UPDATE users SET password_hash = ?, session_version = session_version + 1
                  WHERE email = ? AND account_status = 'approved'"
             );
             $account->execute([password_hash($password, PASSWORD_DEFAULT), $email]);
@@ -650,8 +652,13 @@ final class ApiController
             throw new RuntimeException('Choose a different password from the temporary password.');
         }
 
-        $update = $this->db->prepare('UPDATE users SET password_hash = ?, password_change_required = 0 WHERE id = ?');
+        $update = $this->db->prepare(
+            'UPDATE users SET password_hash = ?, password_change_required = 0, session_version = session_version + 1 WHERE id = ?'
+        );
         $update->execute([password_hash($newPassword, PASSWORD_DEFAULT), (int) $sessionUser['id']]);
+        $version = $this->db->prepare('SELECT session_version FROM users WHERE id = ?');
+        $version->execute([(int) $sessionUser['id']]);
+        $_SESSION['auth_version'] = (int) $version->fetchColumn();
         $this->logActivity('account.password_changed', 'user', (int) $sessionUser['id']);
         session_regenerate_id(true);
         $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
@@ -1779,11 +1786,6 @@ final class ApiController
         if ($user['role'] === 'admin') {
             $statement = $this->db->query(
                 'SELECT p.*, u.first_name, u.last_name, owner_partner.organization_name,
-                        (SELECT CONCAT(MIN(a.start_time), \'–\', MAX(a.end_time))
-                         FROM events e
-                         JOIN event_dates ed ON ed.event_id = e.id
-                         JOIN activities a ON a.event_date_id = ed.id
-                         WHERE e.proposal_id = p.id) AS scheduled_time,
                         (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         NULL AS user_relationship, NULL AS user_invitation_status
                  FROM proposals p
@@ -1794,11 +1796,6 @@ final class ApiController
         } else {
             $statement = $this->db->prepare(
                 'SELECT DISTINCT p.*, u.first_name, u.last_name, owner_partner.organization_name,
-                       (SELECT CONCAT(MIN(a.start_time), \'–\', MAX(a.end_time))
-                        FROM events e
-                        JOIN event_dates ed ON ed.event_id = e.id
-                        JOIN activities a ON a.event_date_id = ed.id
-                        WHERE e.proposal_id = p.id) AS scheduled_time,
                        (SELECT COUNT(*) FROM documents d WHERE d.proposal_id = p.id) AS attachment_count,
                         (SELECT pp.relationship FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_relationship,
                         (SELECT pp.invitation_status FROM proposal_partners pp WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? LIMIT 1) AS user_invitation_status
@@ -1837,17 +1834,17 @@ final class ApiController
         try {
             $statement = $this->db->prepare(
                 'INSERT INTO proposals
-                    (owner_user_id, title, summary, venue, proponents, activity_components, estimated_cost_items,
+                    (owner_user_id, proposer_name, title, summary, venue, proponents, activity_components, estimated_cost_items,
                      total_estimated_cost, justification, target_beneficiaries, target_outputs, possible_risks,
                      expected_private_partnerships, accepts_volunteers, volunteer_approval_mode,
                      period_start, period_end, stated_duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             $statement->execute([
-                $ownerId, $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
+                $ownerId, $brief['proposer_name'], $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
                 $brief['activity_components'], $brief['estimated_cost_items'], $brief['total_estimated_cost'],
                 $brief['justification'], $brief['target_beneficiaries'], $brief['target_outputs'],
-                $brief['possible_risks'], $brief['expected_private_partnerships'],
+                $brief['possible_risks'], null,
                 $brief['accepts_volunteers'], $brief['volunteer_approval_mode'],
                 $brief['period_start'], $brief['period_end'], $brief['duration'],
             ]);
@@ -1887,6 +1884,7 @@ final class ApiController
                 'id' => (int) $proposal['id'],
                 'status' => $proposal['status'],
                 'reviewNotes' => $proposal['review_notes'],
+                'proposerName' => $proposal['proposer_name'],
                 'title' => $proposal['title'],
                 'summary' => $proposal['summary'],
                 'venue' => $proposal['venue'] ?? '',
@@ -1915,7 +1913,11 @@ final class ApiController
         $user = Http::requireRole('partner');
         $this->assertProposalAccess($proposalId, $user, true);
         $data = Http::body();
-        $brief = $this->validatedProjectBrief($data);
+        $existingProposal = $this->proposal($proposalId);
+        $brief = $this->validatedProjectBrief(
+            $data,
+            $this->decodeJsonList($existingProposal['proponents'] ?? null)
+        );
 
         $this->db->beginTransaction();
         try {
@@ -1932,17 +1934,17 @@ final class ApiController
             }
             $statement = $this->db->prepare(
             'UPDATE proposals
-             SET title = ?, summary = ?, venue = ?, proponents = ?, activity_components = ?, estimated_cost_items = ?,
+             SET proposer_name = ?, title = ?, summary = ?, venue = ?, proponents = ?, activity_components = ?, estimated_cost_items = ?,
                  total_estimated_cost = ?, justification = ?, target_beneficiaries = ?, target_outputs = ?,
-                 possible_risks = ?, expected_private_partnerships = ?, accepts_volunteers = ?,
+                 possible_risks = ?, accepts_volunteers = ?,
                  volunteer_approval_mode = ?, period_start = ?, period_end = ?, stated_duration = ?
              WHERE id = ? AND owner_user_id = ? AND status = ?'
             );
             $statement->execute([
-                $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'], $brief['activity_components'],
+                $brief['proposer_name'], $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'], $brief['activity_components'],
                 $brief['estimated_cost_items'], $brief['total_estimated_cost'], $brief['justification'],
                 $brief['target_beneficiaries'], $brief['target_outputs'], $brief['possible_risks'],
-                $brief['expected_private_partnerships'], $brief['accepts_volunteers'],
+                $brief['accepts_volunteers'],
                 $brief['volunteer_approval_mode'], $brief['period_start'], $brief['period_end'],
                 $brief['duration'],
                 $proposalId,
@@ -2034,9 +2036,14 @@ final class ApiController
         $html .= '<table class="brand"><tr><td style="width:48px"><img src="' . $logoDataUri . '" alt="UCC logo"></td><td><h1>UCC · Community Extension Services</h1><div class="sub">PROJECT BRIEF · Prepared by ' . $escape($preparedBy) . '</div></td></tr></table>';
         $html .= '<h2>1. General Project Information</h2><table><tbody>';
         $html .= '<tr><th>Project Name</th><td>' . $escape($project['title']) . '</td></tr>';
+        $html .= '<tr><th>Proposed by</th><td>' . $escape($project['proposer_name'] ?? '') . '</td></tr>';
         $html .= '<tr><th>Brief Description</th><td>' . nl2br($escape($project['summary'])) . '</td></tr>';
         $html .= '<tr><th>Project Venue / Location</th><td>' . $escape($project['venue'] ?? 'Not specified') . '</td></tr>';
-        $html .= '<tr><th>Co-Proponents / Partner Entities</th><td>' . nl2br($escape(implode("\n", $proponents))) . '</td></tr>';
+        $partnerNames = $proponents;
+        if (!empty($project['expected_private_partnerships'])) {
+            $partnerNames[] = 'Historical partnership note: ' . $project['expected_private_partnerships'];
+        }
+        $html .= '<tr><th>Co-Proponents / Partner Organizations</th><td>' . nl2br($escape(implode("\n", $partnerNames))) . '</td></tr>';
         $html .= '<tr><th>Program Term / Duration</th><td>' . $escape($dateRange ?: 'Not specified') . ' · ' . $escape($project['stated_duration'] ?? '') . '</td></tr>';
         $html .= '</tbody></table><h2>2. Activity Components &amp; Justification</h2>';
         $html .= $listTable($activities, ['Activity / Step' => 'activity']);
@@ -2049,7 +2056,6 @@ final class ApiController
             'Target Beneficiaries & Headcount' => $project['target_beneficiaries'] ?? '',
             'Target Outputs / Success Indicators' => $project['target_outputs'] ?? '',
             'Possible Risks & Mitigation Plan' => $project['possible_risks'] ?? '',
-            'Expected Private / External Partner Involvement' => $project['expected_private_partnerships'] ?? '',
         ] as $label => $value) {
             $html .= '<tr><th>' . $escape($label) . '</th><td>' . nl2br($escape($value ?: 'Not specified')) . '</td></tr>';
         }
@@ -2338,7 +2344,7 @@ final class ApiController
     {
         Http::requireRole('admin');
         $proposal = $this->db->prepare(
-            'SELECT id, title, summary, proponents, activity_components, estimated_cost_items,
+            'SELECT id, title, proposer_name, summary, proponents, activity_components, estimated_cost_items,
                     venue, total_estimated_cost, justification, target_beneficiaries, target_outputs,
                     possible_risks, expected_private_partnerships, accepts_volunteers,
                     volunteer_approval_mode, period_start, period_end, stated_duration, status
@@ -2384,6 +2390,7 @@ final class ApiController
             'project' => [
                 'id' => (int) $project['id'],
                 'title' => $project['title'],
+                'proposerName' => $project['proposer_name'],
                 'summary' => $project['summary'],
                 'venue' => $project['venue'] ?? null,
                 'proponents' => $this->decodeJsonList($project['proponents']),
@@ -4933,78 +4940,6 @@ final class ApiController
         }
         $this->assertProposalAccess($proposalId, $user, false);
         $project = $this->proposal($proposalId);
-        $eventAccess = "(? = 'admin' OR e.organizer_user_id = ? OR EXISTS (
-            SELECT 1 FROM event_partners ep
-            WHERE ep.event_id = e.id AND ep.partner_user_id = ?
-        ))";
-        $eventParams = [$proposalId, $user['role'], (int) $user['id'], (int) $user['id']];
-
-        $partners = $this->db->prepare(
-            "SELECT p.organization_name, p.organization_type, pp.relationship
-             FROM proposal_partners pp JOIN partners p ON p.user_id = pp.partner_user_id
-             WHERE pp.proposal_id = ? AND pp.invitation_status = 'accepted'
-             ORDER BY pp.relationship, p.organization_name"
-        );
-        $partners->execute([$proposalId]);
-
-        $schedules = $this->db->prepare(
-            "SELECT e.title AS event_title, ed.event_date, a.title AS activity_title, a.start_time,
-                    a.end_time, a.venue, a.target_participants, a.activity_lead
-             FROM events e JOIN event_dates ed ON ed.event_id = e.id
-             JOIN activities a ON a.event_date_id = ed.id
-             WHERE e.proposal_id = ? AND $eventAccess
-             ORDER BY ed.event_date, a.start_time"
-        );
-        $schedules->execute($eventParams);
-
-        $attendance = $this->db->prepare(
-            "SELECT e.title AS event_title, ed.event_date,
-                    COUNT(DISTINCT CASE WHEN ea.status = 'approved' THEN ea.id END) AS approved_volunteers,
-                    COUNT(DISTINCT CASE WHEN at.status = 'present' THEN at.id END) AS present,
-                    COUNT(DISTINCT CASE WHEN at.status = 'absent' THEN at.id END) AS absent,
-                    COUNT(DISTINCT CASE WHEN at.status = 'excused' THEN at.id END) AS excused
-             FROM events e JOIN event_dates ed ON ed.event_id = e.id
-             LEFT JOIN event_applications ea ON ea.event_id = e.id
-             LEFT JOIN attendance at ON at.application_id = ea.id AND at.event_date_id = ed.id
-             WHERE e.proposal_id = ? AND $eventAccess
-             GROUP BY e.id, e.title, ed.id, ed.event_date
-             ORDER BY ed.event_date"
-        );
-        $attendance->execute($eventParams);
-
-        $volunteers = $this->db->prepare(
-            "SELECT e.title AS event_title, u.first_name, u.last_name,
-                    COALESCE(vp.registration_classification, vp.volunteer_type) AS volunteer_type,
-                    ea.status AS application_status
-             FROM events e JOIN event_applications ea ON ea.event_id = e.id
-             JOIN users u ON u.id = ea.volunteer_user_id
-             JOIN volunteer_profiles vp ON vp.user_id = u.id
-             WHERE e.proposal_id = ? AND $eventAccess
-             ORDER BY e.title, u.last_name, u.first_name"
-        );
-        $volunteers->execute($eventParams);
-
-        $participants = $this->db->prepare(
-            "SELECT e.title AS event_title, ed.event_date, pc.participant_group, SUM(pc.participant_count) AS participant_count
-             FROM participant_counts pc JOIN event_dates ed ON ed.id = pc.event_date_id
-             JOIN events e ON e.id = ed.event_id
-             WHERE e.proposal_id = ? AND $eventAccess
-             GROUP BY e.title, ed.id, ed.event_date, pc.participant_group
-             ORDER BY ed.event_date, pc.participant_group"
-        );
-        $participants->execute($eventParams);
-
-        $documents = $this->db->prepare(
-            'SELECT id, document_type, original_name, description, is_signed, created_at FROM documents
-             WHERE proposal_id = ? ORDER BY created_at'
-        );
-        $documents->execute([$proposalId]);
-
-        $evaluations = $this->db->prepare(
-            'SELECT AVG(rating) AS average_rating, COUNT(*) AS evaluation_count
-             FROM evaluations WHERE proposal_id = ?'
-        );
-        $evaluations->execute([$proposalId]        );
         $owner = $this->db->prepare(
             'SELECT u.id, u.first_name, u.last_name, p.organization_name, p.organization_type
              FROM users u LEFT JOIN partners p ON p.user_id = u.id
@@ -5033,6 +4968,7 @@ final class ApiController
             'project' => [
                 'id' => (int) $project['id'],
                 'ownerUserId' => (int) $project['owner_user_id'],
+                'proposerName' => $project['proposer_name'],
                 'title' => $project['title'],
                 'summary' => $project['summary'],
                 'status' => $project['status'],
@@ -5057,13 +4993,6 @@ final class ApiController
             'userInvitationStatus' => $relationship['invitation_status'] ?? null,
             'classifications' => array_column($classifications->fetchAll(), 'classification'),
             'categories' => array_column($categories->fetchAll(), 'name'),
-            'partners' => $partners->fetchAll(),
-            'schedules' => $schedules->fetchAll(),
-            'attendance' => $attendance->fetchAll(),
-            'volunteers' => $volunteers->fetchAll(),
-            'participants' => $participants->fetchAll(),
-            'documents' => $documents->fetchAll(),
-            'evaluation' => $evaluations->fetch(),
         ]);
     }
 
@@ -5138,7 +5067,7 @@ final class ApiController
         }
     }
 
-    private function validatedProjectBrief(array $data): array
+    private function validatedProjectBrief(array $data, array $legacyOrganizations = []): array
     {
         $text = static function (mixed $value, string $label, int $maxLength, bool $required = true): ?string {
             if (!is_string($value)) {
@@ -5163,6 +5092,7 @@ final class ApiController
         };
 
         $title = $text($data['title'] ?? null, 'Project name', 190);
+        $proposerName = $text($data['proposerName'] ?? null, 'Proposer full name', 190);
         $summary = $text($data['summary'] ?? null, 'Brief description', 10000);
         $venue = $text($data['venue'] ?? '', 'Project venue / location', 255, false);
         $acceptsVolunteers = filter_var(
@@ -5181,6 +5111,29 @@ final class ApiController
             $approvalMode = 'manual';
         }
         $proponents = $stringList($data['proponents'] ?? null, 'Proponent', 30, 190);
+        $allowedOrganizations = [
+            'University of Caloocan City - Main',
+            'University of Caloocan City - North',
+            'University of Caloocan City - South',
+            'City Government of Caloocan City',
+        ];
+        $organizations = $this->db->query(
+            "SELECT DISTINCT partner.organization_name
+             FROM partners partner
+             JOIN users account ON account.id = partner.user_id
+             WHERE account.role = 'partner' AND account.account_status IN ('approved', 'pending')"
+        )->fetchAll(PDO::FETCH_COLUMN);
+        $allowedOrganizations = array_merge($allowedOrganizations, $organizations);
+        foreach ($legacyOrganizations as $organization) {
+            if (is_string($organization) && trim($organization) !== '') {
+                $allowedOrganizations[] = trim($organization);
+            }
+        }
+        foreach ($proponents as $organization) {
+            if (!in_array($organization, $allowedOrganizations, true)) {
+                throw new RuntimeException('Choose partner entities from the organization selector.');
+            }
+        }
         $start = $this->requiredDate($data['periodStart'] ?? null);
         $end = $this->requiredDate($data['periodEnd'] ?? null);
         if ($end < $start) {
@@ -5191,7 +5144,6 @@ final class ApiController
         $beneficiaries = $text($data['targetBeneficiaries'] ?? null, 'Target beneficiaries and headcount', 10000);
         $outputs = $text($data['targetOutputs'] ?? null, 'Target outputs / success indicators', 10000);
         $risks = $text($data['possibleRisks'] ?? null, 'Possible risks and mitigation plan', 10000);
-        $externalPartners = $text($data['expectedPrivatePartnerships'] ?? '', 'Expected private / external partnerships', 10000, false);
         $duration = $text($data['duration'] ?? '', 'Program duration', 100, false);
         $budgetInput = $data['estimatedCostItems'] ?? null;
         if (!is_array($budgetInput) || count($budgetInput) < 1 || count($budgetInput) > 100) {
@@ -5232,6 +5184,7 @@ final class ApiController
         }
         $duration = $duration ?? $start . ' to ' . $end;
         return [
+            'proposer_name' => $proposerName,
             'title' => $title,
             'summary' => $summary,
             'venue' => $venue,
@@ -5245,7 +5198,6 @@ final class ApiController
             'target_beneficiaries' => $beneficiaries,
             'target_outputs' => $outputs,
             'possible_risks' => $risks,
-            'expected_private_partnerships' => $externalPartners,
             'period_start' => $start,
             'period_end' => $end,
             'duration' => $duration,
@@ -5462,11 +5414,17 @@ final class ApiController
         if (!is_array($sessionUser) || !isset($sessionUser['id'], $sessionUser['role'])) {
             return;
         }
-        $statement = $this->db->prepare('SELECT role, account_status, password_change_required FROM users WHERE id = ?');
+        $statement = $this->db->prepare(
+            'SELECT role, account_status, password_change_required, session_version FROM users WHERE id = ?'
+        );
         $statement->execute([(int) $sessionUser['id']]);
         $account = $statement->fetch();
-        if (!$account || $account['role'] !== $sessionUser['role'] || $account['account_status'] !== 'approved') {
+        if (!$account || $account['role'] !== $sessionUser['role'] ||
+            $account['account_status'] !== 'approved' ||
+            !isset($_SESSION['auth_version']) ||
+            (int) $_SESSION['auth_version'] !== (int) $account['session_version']) {
             unset($_SESSION['user']);
+            unset($_SESSION['auth_version']);
             session_regenerate_id(true);
             $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
             return;

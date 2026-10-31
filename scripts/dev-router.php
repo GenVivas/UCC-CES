@@ -18,4 +18,5 @@ if ($requestedFile !== false && str_starts_with($requestedFile, $publicRoot . DI
     return false;
 }
 
-require $publicRoot . DIRECTORY_SEPARATOR . 'index.html';
+$_SERVER['SCRIPT_NAME'] = '/index.php';
+require $publicRoot . DIRECTORY_SEPARATOR . 'index.php';
