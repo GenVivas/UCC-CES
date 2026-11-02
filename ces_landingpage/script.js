@@ -282,6 +282,7 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
     const target = document.querySelector(this.getAttribute('href'));
     if (!target) return;
     e.preventDefault();
+    if (modal.contains(this)) closeModal();
     const offset = parseInt(
       getComputedStyle(document.documentElement).getPropertyValue('--nav-h')
     ) || 72;

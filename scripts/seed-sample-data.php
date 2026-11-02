@@ -206,7 +206,6 @@ $deleteTables = [
     'event_documentations', 'event_applications', 'participant_counts', 'activities', 'event_dates', 'event_partners', 'events',
     'proposal_categories', 'proposal_classifications', 'proposal_partners', 'proposals',
     'notifications', 'activity_logs', 'volunteer_event_evaluations', 'volunteer_documentations', 'password_reset_otps',
-    'partner_subcategories', 'subcategories', 'sectors', 'categories',
 ];
 
 $db->beginTransaction();
@@ -219,6 +218,7 @@ try {
         'INSERT INTO users (email,password_hash,role,account_status,rejection_reason,first_name,last_name,contact_number)
          VALUES (?,?,?,?,?,?,?,?)'
     );
+    $samplePartnerIds = [];
     foreach ($sampleAccounts as $sampleAccount) {
         $existing = $db->prepare('SELECT id,role FROM users WHERE email = ?');
         $existing->execute([$sampleAccount['email']]);
@@ -244,6 +244,7 @@ try {
             $userId = (int) $db->lastInsertId();
         }
         if ($sampleAccount['role'] === 'partner') {
+            $samplePartnerIds[] = $userId;
             $profile = $db->prepare(
                 "INSERT INTO partners
                     (user_id,organization_name,organization_type,organization_category,official_designation,verification_path,address)
@@ -263,7 +264,7 @@ try {
     }
 
     $categoryIds = [];
-    $categoryInsert = $db->prepare('INSERT INTO categories (name) VALUES (?)');
+    $categoryInsert = $db->prepare('INSERT IGNORE INTO categories (name) VALUES (?)');
     foreach ($categories as $category) {
         $categoryInsert->execute([$category]);
     }
@@ -271,21 +272,27 @@ try {
         $categoryIds[$row['name']] = (int) $row['id'];
     }
 
-    $sectorInsert = $db->prepare('INSERT INTO sectors (name) VALUES (?)');
-    $subcategoryInsert = $db->prepare('INSERT INTO subcategories (sector_id,name) VALUES (?,?)');
+    $sectorInsert = $db->prepare('INSERT IGNORE INTO sectors (name) VALUES (?)');
+    $sectorIdQuery = $db->prepare('SELECT id FROM sectors WHERE name = ?');
+    $subcategoryInsert = $db->prepare('INSERT IGNORE INTO subcategories (sector_id,name) VALUES (?,?)');
+    $subcategoryIdQuery = $db->prepare('SELECT id FROM subcategories WHERE sector_id = ? AND name = ?');
     $subcategoryIds = [];
     foreach ($taxonomy as $sectorName => $subcategoryNames) {
         $sectorInsert->execute([$sectorName]);
-        $sectorId = (int) $db->lastInsertId();
+        $sectorIdQuery->execute([$sectorName]);
+        $sectorId = (int) $sectorIdQuery->fetchColumn();
         foreach ($subcategoryNames as $subcategoryName) {
             $subcategoryInsert->execute([$sectorId, $subcategoryName]);
-            $subcategoryIds[$subcategoryName] = (int) $db->lastInsertId();
+            $subcategoryIdQuery->execute([$sectorId, $subcategoryName]);
+            $subcategoryIds[$subcategoryName] = (int) $subcategoryIdQuery->fetchColumn();
         }
     }
 
-    $partnerSubcategory = $db->prepare('INSERT INTO partner_subcategories (partner_user_id,subcategory_id) VALUES (?,?)');
+    $partnerSubcategory = $db->prepare('INSERT IGNORE INTO partner_subcategories (partner_user_id,subcategory_id) VALUES (?,?)');
     foreach (['Digital Literacy', 'Learning Support', 'Community Health Education', 'Urban Greening', 'Microenterprise Skills', 'Household Preparedness', 'Gender and Development'] as $subcategory) {
-        $partnerSubcategory->execute([$partnerIds[0], $subcategoryIds[$subcategory]]);
+        foreach ($samplePartnerIds as $samplePartnerId) {
+            $partnerSubcategory->execute([$samplePartnerId, $subcategoryIds[$subcategory]]);
+        }
     }
 
     $proposalInsert = $db->prepare(

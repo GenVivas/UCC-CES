@@ -13,6 +13,8 @@ const pageRoutes = {
     'joined-events': 'joined-events',
     certificates: 'certificates',
     evaluations: 'evaluations',
+    'manage-evaluations': 'manage-evaluations',
+    'evaluation-reports': 'evaluation-reports',
     documentations: 'documentations',
     accounts: 'accounts',
     reports: 'reports',
@@ -760,6 +762,8 @@ async function renderPage(page) {
         'joined-events': ['volunteer'],
         certificates: ['volunteer'],
         evaluations: ['admin', 'partner', 'volunteer'],
+        'manage-evaluations': ['admin', 'partner'],
+        'evaluation-reports': ['admin', 'partner'],
         documentations: ['partner', 'volunteer'],
         'activity-logs': ['admin']
     };
@@ -791,8 +795,10 @@ async function renderPage(page) {
         reports: ['System-wide Reports', 'Analyze proposals, projects, events, volunteers, partners, and feedback.'],
         notifications: ['Notifications', 'Your latest system updates.'],
         evaluations: currentUser.role === 'volunteer'
-            ? ['Evaluation Reports', 'Share feedback and review your submitted post-event evaluations.']
-            : ['Evaluation', 'Review volunteer feedback and analyze event satisfaction.'],
+            ? ['Event Evaluations', 'Complete evaluation forms for events you are assigned to and review submitted feedback.']
+            : ['Evaluation Reports', 'Review volunteer feedback and analyze event satisfaction.'],
+        'manage-evaluations': ['Manage Evaluation', 'Build, assign, and activate event evaluation forms.'],
+        'evaluation-reports': ['Evaluation Reports', 'Review response counts, ratings, feedback, and question summaries.'],
         'event-history': ['Event History & Documentations', 'Browse completed programs and their project records.'],
         'activity-logs': ['Activity Logs', 'Review the administrative audit trail of important system changes.'],
         profile: ['My Profile', 'Manage your account details and security settings.']
@@ -811,6 +817,8 @@ async function renderPage(page) {
             if (currentUser.role === 'volunteer') await renderVolunteerEvaluations();
             else await renderEvaluationReports();
         }
+        if (page === 'manage-evaluations') await renderEvaluationManagement();
+        if (page === 'evaluation-reports') await renderEvaluationReports();
         if (page === 'documentations') {
             if (currentUser.role === 'partner') await renderPartnerDocumentations();
             else await renderVolunteerDocumentations();
@@ -1466,6 +1474,7 @@ function createProposalWizard(categories, partners, proposal = null) {
             <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
             <label class="wide">Project Venue / Location<input name="venue" maxlength="255" placeholder="Enter a venue or leave blank if it is still to be determined"></label>
             <label class="wide">Proposer Full Name<input name="proposerName" maxlength="190" autocomplete="name" required></label>
+            ${proposal ? '' : '<div class="wide proposal-signature-field"><strong>Proponent E-Signature</strong><p class="field-hint">Sign in the box using a mouse, touch screen, or stylus. This signature will be stored privately with this proposal.</p><canvas class="proposal-signature-pad" width="700" height="180" data-signature-canvas aria-label="Draw your electronic signature"></canvas><input type="hidden" name="eSignature"><div class="proposal-signature-actions"><button type="button" class="button button-quiet button-small" data-clear-signature>Clear signature</button><span data-signature-status role="status">Signature required</span></div></div>'}
             <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Organizations</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add organization</button></div><p class="field-hint">Select UCC campuses or an approved/pending partner organization. Add multiple organizations as needed.</p><div data-proponents-list></div></div>
             <label>Program Start Date<input name="periodStart" type="date" required></label>
             <label>Program End Date<input name="periodEnd" type="date" required></label>
@@ -1503,6 +1512,54 @@ function createProposalWizard(categories, partners, proposal = null) {
             <button type="button" class="button button-primary" data-wizard-next>Next: Activity Components →</button>
             <button type="submit" class="button button-primary" data-wizard-submit hidden>Save Draft</button>
         </div>`;
+    const signatureCanvas = form.querySelector('[data-signature-canvas]');
+    if (signatureCanvas) {
+        const context = signatureCanvas.getContext('2d');
+        let drawing = false;
+        let signed = false;
+        const signatureStatus = form.querySelector('[data-signature-status]');
+        context.strokeStyle = '#173f31';
+        context.lineWidth = 2.5;
+        context.lineCap = 'round';
+        context.lineJoin = 'round';
+        signatureCanvas.addEventListener('pointerdown', event => {
+            drawing = true;
+            signatureCanvas.setPointerCapture(event.pointerId);
+            const bounds = signatureCanvas.getBoundingClientRect();
+            context.beginPath();
+            context.moveTo(
+                (event.clientX - bounds.left) * signatureCanvas.width / bounds.width,
+                (event.clientY - bounds.top) * signatureCanvas.height / bounds.height
+            );
+            event.preventDefault();
+        });
+        signatureCanvas.addEventListener('pointermove', event => {
+            if (!drawing) return;
+            const bounds = signatureCanvas.getBoundingClientRect();
+            context.lineTo(
+                (event.clientX - bounds.left) * signatureCanvas.width / bounds.width,
+                (event.clientY - bounds.top) * signatureCanvas.height / bounds.height
+            );
+            context.stroke();
+            signed = true;
+            signatureStatus.textContent = 'Signature captured';
+        });
+        const stopDrawing = () => { drawing = false; };
+        signatureCanvas.addEventListener('pointerup', stopDrawing);
+        signatureCanvas.addEventListener('pointercancel', stopDrawing);
+        form.querySelector('[data-clear-signature]').addEventListener('click', () => {
+            context.clearRect(0, 0, signatureCanvas.width, signatureCanvas.height);
+            signed = false;
+            form.elements.eSignature.value = '';
+            signatureStatus.textContent = 'Signature required';
+        });
+        form.dataset.signatureCaptured = 'false';
+        signatureCanvas.addEventListener('pointerup', () => {
+            if (!signed) return;
+            form.elements.eSignature.value = signatureCanvas.toDataURL('image/png');
+            form.dataset.signatureCaptured = 'true';
+        });
+    }
     const ownerSelect = form.querySelector('[data-proposal-owner]');
     if (ownerSelect) {
         partners.forEach(partner => ownerSelect.add(new Option(partner.organization_name, partner.id)));
@@ -1869,6 +1926,7 @@ function serializeProposalWizard(form) {
     }));
     data.classifications = formData.getAll('classifications');
     data.categoryIds = formData.getAll('categoryIds');
+    if (form.elements.eSignature) data.eSignature = form.elements.eSignature.value;
     return data;
 }
 
@@ -1904,6 +1962,12 @@ function validateCompleteProposalWizard(form) {
             showMessage(pageMessage, 'Select at least one project classification and CES category.', 'error');
             return false;
         }
+    }
+    if (form.querySelector('[data-signature-canvas]') && form.dataset.signatureCaptured !== 'true') {
+        showProposalWizardStep(form, 0);
+        showMessage(pageMessage, 'Draw the proponent signature before creating the proposal.', 'error');
+        form.querySelector('[data-signature-canvas]').focus();
+        return false;
     }
     clearMessage(pageMessage);
     return true;
@@ -2461,9 +2525,48 @@ async function renderVolunteerCertificates() {
 }
 
 async function renderVolunteerEvaluations() {
-    const { evaluations, eligibleEvents } = await request('/volunteer/evaluations');
-    const section = panel('Evaluation Reports', 'Submit post-event feedback after attending an event, and review your previous submissions.');
+    const { evaluations, eligibleEvents, assignedEvents = [] } = await request('/volunteer/evaluations');
     const requestedEventId = new URLSearchParams(window.location.search).get('event');
+    const requestedEvent = assignedEvents.find(item => String(item.id) === requestedEventId && !Number(item.has_responded));
+    if (requestedEvent) {
+        await renderVolunteerEvaluationForm(Number(requestedEvent.id));
+        return;
+    }
+
+    const section = panel('Assigned event evaluation forms', 'Only forms for events where you have an approved registration or recorded attendance are shown.');
+    if (!assignedEvents.length) {
+        section.append(node('p', 'No active evaluation forms are currently assigned to your events.'));
+    } else {
+        const wrap = node('div', undefined, 'proposal-table-wrap evaluation-table-wrap');
+        const table = node('table', undefined, 'proposal-table evaluation-event-table');
+        const head = node('thead');
+        const header = node('tr');
+        ['Event', 'Project', 'Schedule', 'Form', 'Status'].forEach(label => header.append(node('th', label)));
+        head.append(header);
+        const body = node('tbody');
+        assignedEvents.forEach(item => {
+            const row = node('tr');
+            const eventCell = node('td');
+            const open = node('button', item.title, 'link-button evaluation-event-open');
+            open.type = 'button';
+            open.addEventListener('click', () => renderVolunteerEvaluationForm(Number(item.id)));
+            eventCell.append(open);
+            row.append(
+                eventCell,
+                node('td', item.project_title),
+                node('td', `${dashboardDate(item.first_event_date, { month: 'short', day: 'numeric', year: 'numeric' })} – ${dashboardDate(item.last_event_date, { month: 'short', day: 'numeric', year: 'numeric' })}`),
+                node('td', item.form_title),
+                node('td', Number(item.has_responded) ? 'Submitted' : 'Open')
+            );
+            if (!Number(item.has_responded)) row.classList.add('evaluation-event-row');
+            body.append(row);
+        });
+        table.append(head, body);
+        wrap.append(table);
+        section.append(wrap);
+    }
+
+    const legacySection = panel('Previous event feedback', 'Review your submitted legacy evaluations or submit feedback for an attended event that has not yet been evaluated with a form.');
     let focusEvaluationForm = false;
     if (eligibleEvents.length) {
         const form = node('form', undefined, 'panel-form volunteer-evaluation-form');
@@ -2489,11 +2592,11 @@ async function renderVolunteerEvaluations() {
                 submit.disabled = false;
             }
         });
-        section.append(form);
+        legacySection.append(form);
     } else {
-        section.append(node('p', 'An event will become eligible for evaluation after your approved attendance is recorded.'));
+        legacySection.append(node('p', 'An event will become eligible for this feedback after your approved attendance is recorded.'));
         if (requestedEventId) {
-            section.append(node('p', 'This event is not currently eligible for your evaluation. Confirm your application and attendance status with the event organizer.', 'event-evaluation-link-notice'));
+            legacySection.append(node('p', 'This event is not currently eligible for this feedback. Confirm your application and attendance status with the event organizer.', 'event-evaluation-link-notice'));
         }
     }
     const history = panel('Submitted evaluations');
@@ -2521,8 +2624,329 @@ async function renderVolunteerEvaluations() {
     };
     renderRows();
     history.append(list, pagination);
-    pageContent.append(section, history);
-    if (focusEvaluationForm) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    pageContent.append(section, legacySection, history);
+    if (focusEvaluationForm) legacySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function renderVolunteerEvaluationForm(eventId) {
+    try {
+        const { form: evaluationForm, questions } = await request(`/volunteer/evaluations/${eventId}/form`);
+        pageContent.replaceChildren();
+        const section = panel(evaluationForm.title, evaluationForm.description || 'Share feedback about this event.');
+        section.append(node('p', 'Your response is private to the event organizers and CES Admin.'));
+        const form = node('form', undefined, 'form-stack evaluation-response-form');
+        questions.forEach((question, index) => {
+            const field = node('fieldset', undefined, 'evaluation-response-question');
+            const legend = node('legend', `${index + 1}. ${question.text}${question.required ? ' *' : ''}`);
+            field.append(legend);
+            const name = `question_${question.id}`;
+            if (question.type === 'rating') {
+                const select = node('select');
+                select.name = name;
+                select.required = question.required;
+                select.append(new Option('Choose a rating', ''));
+                for (let rating = 1; rating <= Number(question.settings.max || 5); rating++) {
+                    select.append(new Option(String(rating), String(rating)));
+                }
+                field.append(select);
+            } else if (['multiple_choice', 'checkboxes'].includes(question.type)) {
+                (question.settings.options || []).forEach((option, optionIndex) => {
+                    const label = node('label', undefined, 'evaluation-choice-option');
+                    const input = node('input');
+                    input.type = question.type === 'checkboxes' ? 'checkbox' : 'radio';
+                    input.name = question.type === 'checkboxes' ? `${name}[]` : name;
+                    input.value = option;
+                    input.required = question.required && question.type === 'multiple_choice' && optionIndex === 0;
+                    label.append(input, node('span', option));
+                    field.append(label);
+                });
+                if (question.type === 'multiple_choice' && question.required) {
+                    field.querySelectorAll('input[type="radio"]').forEach(input => { input.required = true; });
+                }
+            } else if (question.type === 'dropdown') {
+                const select = node('select');
+                select.name = name;
+                select.required = question.required;
+                select.append(new Option('Choose an option', ''));
+                (question.settings.options || []).forEach(option => select.append(new Option(option, option)));
+                field.append(select);
+            } else {
+                const input = node(question.type === 'paragraph' ? 'textarea' : 'input');
+                input.name = name;
+                input.required = question.required;
+                input.maxLength = question.type === 'paragraph' ? 5000 : 300;
+                if (question.type === 'paragraph') input.rows = 4;
+                field.append(input);
+            }
+            form.append(field);
+        });
+        const actions = node('div', undefined, 'evaluation-form-actions');
+        const back = button('Back to assigned events', 'back-to-assigned-evaluations');
+        const submit = node('button', 'Submit evaluation', 'button button-primary');
+        submit.type = 'submit';
+        actions.append(back, submit);
+        form.append(actions);
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (!form.reportValidity()) return;
+            const answers = {};
+            questions.forEach(question => {
+                const name = `question_${question.id}`;
+                if (question.type === 'checkboxes') {
+                    answers[question.id] = [...form.querySelectorAll(`input[name="${name}[]"]:checked`)].map(input => input.value);
+                } else {
+                    const input = form.elements.namedItem(name);
+                    if (input && input.value !== '') answers[question.id] = input.value;
+                }
+            });
+            submit.disabled = true;
+            try {
+                await request(`/volunteer/evaluations/${eventId}`, {
+                    method: 'POST',
+                    body: JSON.stringify({ answers })
+                });
+                await renderVolunteerEvaluations();
+                showMessage(pageMessage, 'Your event evaluation was submitted.');
+            } catch (error) {
+                showMessage(pageMessage, error.message, 'error');
+                submit.disabled = false;
+            }
+        });
+        back.addEventListener('click', () => {
+            const url = pageUrl('evaluations');
+            if (window.location.search) window.history.replaceState({ page: 'evaluations' }, '', url);
+            renderVolunteerEvaluations();
+        });
+        section.append(form);
+        pageContent.append(section);
+    } catch (error) {
+        showMessage(pageMessage, error.message, 'error');
+        await renderVolunteerEvaluations();
+    }
+}
+
+function evaluationQuestionCard(question = {}) {
+    const card = node('article', undefined, 'evaluation-question-card');
+    const header = node('div', undefined, 'evaluation-question-header');
+    const title = node('strong', 'Evaluation question');
+    const remove = button('Remove', 'remove-evaluation-question', 'button button-danger button-small');
+    remove.addEventListener('click', () => card.remove());
+    header.append(title, remove);
+
+    const fields = node('div', undefined, 'evaluation-question-fields');
+    const textLabel = node('label', 'Question');
+    const text = node('input');
+    text.name = 'questionText';
+    text.maxLength = 500;
+    text.required = true;
+    text.value = question.text || '';
+    textLabel.append(text);
+
+    const typeLabel = node('label', 'Question type');
+    const type = node('select');
+    type.name = 'questionType';
+    [
+        ['rating', 'Rating scale'],
+        ['multiple_choice', 'Multiple choice'],
+        ['checkboxes', 'Checkboxes'],
+        ['dropdown', 'Dropdown'],
+        ['short_answer', 'Short answer'],
+        ['paragraph', 'Long text paragraph']
+    ].forEach(([value, label]) => type.append(new Option(label, value)));
+    type.value = question.type || 'rating';
+    typeLabel.append(type);
+
+    const requiredLabel = node('label', undefined, 'evaluation-required-toggle');
+    const required = node('input');
+    required.type = 'checkbox';
+    required.name = 'questionRequired';
+    required.checked = Boolean(question.required);
+    requiredLabel.append(required, node('span', 'Required question'));
+    fields.append(textLabel, typeLabel, requiredLabel);
+
+    const ratingSettings = node('label', 'Rating range');
+    ratingSettings.className = 'evaluation-question-settings';
+    const ratingMax = node('select');
+    ratingMax.name = 'ratingMax';
+    ratingMax.append(new Option('1–5', '5'), new Option('1–10', '10'));
+    ratingMax.value = String(question.settings?.max || 5);
+    ratingSettings.append(ratingMax);
+
+    const choiceSettings = node('label', 'Answer options (one per line)');
+    choiceSettings.className = 'evaluation-question-settings';
+    const options = node('textarea');
+    options.name = 'questionOptions';
+    options.rows = 4;
+    options.maxLength = 2500;
+    options.value = (question.settings?.options || []).join('\n');
+    choiceSettings.append(options);
+    card.append(header, fields, ratingSettings, choiceSettings);
+    const updateSettings = () => {
+        ratingSettings.hidden = type.value !== 'rating';
+        choiceSettings.hidden = !['multiple_choice', 'checkboxes', 'dropdown'].includes(type.value);
+    };
+    type.addEventListener('change', updateSettings);
+    updateSettings();
+    return card;
+}
+
+async function renderEvaluationManagement(selectedEventId = null, notice = '') {
+    const { events } = await request('/evaluation-forms');
+    pageContent.replaceChildren();
+    if (notice) showMessage(pageMessage, notice);
+    const listing = panel('Approved and ongoing events', 'Select an event to build its evaluation form. Partner users only see events they are authorized to manage.');
+    if (!events.length) {
+        listing.append(node('p', 'There are no approved or ongoing scheduled events available for evaluation forms.'));
+    } else {
+        const wrap = node('div', undefined, 'proposal-table-wrap evaluation-table-wrap');
+        const table = node('table', undefined, 'proposal-table evaluation-event-table');
+        const head = node('thead');
+        const header = node('tr');
+        ['Event title', 'Date', 'Proposer / partner', 'Form status', 'Responses'].forEach(label => header.append(node('th', label)));
+        head.append(header);
+        const body = node('tbody');
+        events.forEach(event => {
+            const row = node('tr', undefined, 'evaluation-event-row');
+            const eventCell = node('td');
+            const open = node('button', event.title, 'link-button evaluation-event-open');
+            open.type = 'button';
+            open.addEventListener('click', () => renderEvaluationFormEditor(Number(event.id)));
+            eventCell.append(open);
+            const dates = `${dashboardDate(event.first_event_date, { month: 'short', day: 'numeric', year: 'numeric' })} – ${dashboardDate(event.last_event_date, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+            const owner = [event.proposer_name, event.partner_name].filter(Boolean).join(' · ') || event.project_title;
+            const status = !event.form_id
+                ? 'No Form'
+                : event.form_status === 'draft'
+                    ? 'Draft'
+                    : Number(event.is_active) ? 'Published · Active' : 'Published · Inactive';
+            row.append(eventCell, node('td', dates), node('td', owner), node('td', status), node('td', event.response_count));
+            row.addEventListener('click', eventClick => {
+                if (eventClick.target.closest('button')) return;
+                renderEvaluationFormEditor(Number(event.id));
+            });
+            body.append(row);
+        });
+        table.append(head, body);
+        wrap.append(table);
+        listing.append(wrap);
+    }
+    pageContent.append(listing);
+    if (selectedEventId) await renderEvaluationFormEditor(selectedEventId, false);
+}
+
+async function renderEvaluationFormEditor(eventId, appendToPage = true) {
+    const { event, form: savedForm, questions } = await request(`/events/${eventId}/evaluation-form`);
+    if (appendToPage) pageContent.replaceChildren();
+    const details = panel(event.title, `${event.project_title} · ${event.proposer_name || event.partner_name || 'UCC-CES'} · ${event.venue || 'Venue to be confirmed'} · ${dashboardDate(event.first_event_date, { month: 'short', day: 'numeric', year: 'numeric' })} – ${dashboardDate(event.last_event_date, { month: 'short', day: 'numeric', year: 'numeric' })}`);
+    const back = node('button', 'Back to event list', 'button button-quiet button-small');
+    back.type = 'button';
+    back.addEventListener('click', () => renderEvaluationManagement());
+    details.append(back);
+    const editor = node('form', undefined, 'evaluation-builder-form');
+    const basics = node('div', undefined, 'evaluation-builder-basics');
+    const titleLabel = node('label', 'Form title');
+    const titleInput = node('input');
+    titleInput.name = 'formTitle';
+    titleInput.maxLength = 190;
+    titleInput.required = true;
+    titleInput.value = savedForm?.title || `${event.title} Evaluation`;
+    titleLabel.append(titleInput);
+    const descriptionLabel = node('label', 'Form description and instructions');
+    const description = node('textarea');
+    description.name = 'formDescription';
+    description.rows = 3;
+    description.maxLength = 5000;
+    description.value = savedForm?.description || '';
+    descriptionLabel.append(description);
+    basics.append(titleLabel, descriptionLabel);
+
+    const questionSection = node('section', undefined, 'evaluation-question-section');
+    const questionHeading = node('div', undefined, 'evaluation-question-toolbar');
+    questionHeading.append(node('h3', 'Questions'));
+    const addType = node('select');
+    addType.setAttribute('aria-label', 'New question type');
+    [
+        ['rating', 'Rating scale'],
+        ['multiple_choice', 'Multiple choice'],
+        ['checkboxes', 'Checkboxes'],
+        ['dropdown', 'Dropdown'],
+        ['short_answer', 'Short answer'],
+        ['paragraph', 'Long text paragraph']
+    ].forEach(([value, label]) => addType.append(new Option(label, value)));
+    const addQuestion = node('button', 'Add question', 'button button-quiet button-small');
+    addQuestion.type = 'button';
+    addQuestion.addEventListener('click', () => {
+        const blank = evaluationQuestionCard({ type: addType.value, settings: { max: 5, options: [] } });
+        questionSection.querySelector('.evaluation-question-list').append(blank);
+        blank.querySelector('[name="questionText"]').focus();
+    });
+    questionHeading.append(addType, addQuestion);
+    const questionList = node('div', undefined, 'evaluation-question-list');
+    questions.forEach(question => questionList.append(evaluationQuestionCard(question)));
+    questionSection.append(questionHeading, questionList);
+
+    const actions = node('div', undefined, 'evaluation-form-actions');
+    const status = savedForm?.status || 'draft';
+    let active = Boolean(Number(savedForm?.is_active));
+    const saveDraft = node('button', 'Save draft', 'button button-quiet');
+    saveDraft.type = 'button';
+    const publish = node('button', 'Publish form', 'button button-primary');
+    publish.type = 'button';
+    const toggleActive = node('button', active ? 'Deactivate form' : 'Activate form', 'button button-quiet');
+    toggleActive.type = 'button';
+    toggleActive.disabled = status !== 'published';
+    if (savedForm?.updated_at) actions.append(node('span', `Last saved ${dashboardDate(savedForm.updated_at, { month: 'short', day: 'numeric', year: 'numeric' })}`, 'fine-print'));
+    actions.append(saveDraft, publish, toggleActive);
+    editor.append(basics, questionSection, actions);
+    details.append(editor);
+    pageContent.append(details);
+
+    const serializeQuestions = () => [...questionList.querySelectorAll('.evaluation-question-card')].map(card => {
+        const type = card.querySelector('[name="questionType"]').value;
+        const settings = type === 'rating'
+            ? { max: Number(card.querySelector('[name="ratingMax"]').value) }
+            : ['multiple_choice', 'checkboxes', 'dropdown'].includes(type)
+                ? { options: card.querySelector('[name="questionOptions"]').value.split(/\r?\n/).map(option => option.trim()).filter(Boolean) }
+                : {};
+        return {
+            text: card.querySelector('[name="questionText"]').value.trim(),
+            type,
+            required: card.querySelector('[name="questionRequired"]').checked,
+            settings
+        };
+    });
+    const save = async (nextStatus, nextActive) => {
+        if (!editor.reportValidity()) return;
+        const questionsToSave = serializeQuestions();
+        if (nextStatus === 'published' && !questionsToSave.length) {
+            showMessage(pageMessage, 'Add at least one question before publishing.', 'error');
+            return;
+        }
+        const payload = {
+            title: titleInput.value,
+            description: description.value,
+            status: nextStatus,
+            active: nextActive,
+            questions: questionsToSave
+        };
+        saveDraft.disabled = publish.disabled = toggleActive.disabled = true;
+        try {
+            await request(`/events/${eventId}/evaluation-form`, {
+                method: 'PUT',
+                body: JSON.stringify(payload)
+            });
+            await renderEvaluationManagement(eventId, nextStatus === 'published'
+                ? (nextActive ? 'Evaluation form published and activated.' : 'Evaluation form published.')
+                : 'Draft saved. The volunteer form is inactive until it is published and activated.');
+        } catch (error) {
+            showMessage(pageMessage, error.message, 'error');
+            saveDraft.disabled = publish.disabled = false;
+            toggleActive.disabled = status !== 'published';
+        }
+    };
+    saveDraft.addEventListener('click', () => save('draft', false));
+    publish.addEventListener('click', () => save('published', true));
+    toggleActive.addEventListener('click', () => save('published', !active));
 }
 
 async function renderVolunteerDocumentations() {
@@ -3758,7 +4182,11 @@ function addReportTable(section, headers, rows, valueForCell) {
     const body = node('tbody');
     const renderRow = row => {
         const tableRow = node('tr');
-        valueForCell(row).forEach(value => tableRow.append(node('td', value ?? '—')));
+        valueForCell(row).forEach(value => {
+            const cell = node('td');
+            cell.append(value instanceof Node ? value : node('span', value ?? '—'));
+            tableRow.append(cell);
+        });
         return tableRow;
     };
     table.append(head, body);
@@ -3798,25 +4226,106 @@ async function renderEvaluationReports() {
         const summary = node('div', undefined, 'dashboard-metrics');
         [
             ['Responses', result.summary.responses],
-            ['Average rating', `${result.summary.average_rating} / 5`],
-            ['Positive (4–5)', result.summary.positive_responses],
-            ['Events evaluated', result.summary.events_evaluated]
+            ['Overall average rating', result.summary.average_rating],
+            ['Positive ratings', result.summary.positive_responses],
+            ['Negative ratings', result.summary.negative_responses],
+            ['Events evaluated', result.summary.events_evaluated],
+            ['Completion rate', `${result.summary.completion_rate}%`]
         ].forEach(([label, value]) => {
             const card = node('article', undefined, 'metric-card dashboard-metric');
             card.append(node('span', label), node('strong', value));
             summary.append(card);
         });
         output.append(summary);
+        const sentiment = panel('Satisfaction and sentiment overview');
+        const ratedAnswers = result.summary.rated_answers;
+        const positiveShare = ratedAnswers
+            ? result.summary.positive_responses / ratedAnswers * 100
+            : 0;
+        const sentimentBar = node('div', undefined, 'evaluation-sentiment-bar');
+        sentimentBar.setAttribute('role', 'img');
+        sentimentBar.setAttribute(
+            'aria-label',
+            `${result.summary.positive_responses} positive and ${result.summary.negative_responses} negative rating answers`
+        );
+        const positive = node('span', undefined, 'evaluation-sentiment-positive');
+        positive.style.width = `${positiveShare}%`;
+        const negative = node('span', undefined, 'evaluation-sentiment-negative');
+        negative.style.width = `${ratedAnswers ? 100 - positiveShare : 0}%`;
+        sentimentBar.append(positive, negative);
+        sentiment.append(sentimentBar);
+        sentiment.append(node('p', `${result.summary.positive_responses} positive · ${result.summary.negative_responses} negative rating answer(s)`));
+        output.append(sentiment);
         const distribution = panel('Rating distribution');
         const distributionList = node('div', undefined, 'record-list');
-        for (let rating = 5; rating >= 1; rating--) {
+        const maxRating = Math.max(result.summary.rating_scale_max, ...result.distribution.map(item => Number(item.rating)));
+        for (let rating = maxRating; rating >= 1; rating--) {
             const row = result.distribution.find(item => Number(item.rating) === rating);
             const record = node('article', undefined, 'record');
-            record.append(node('div', `${rating} / 5`, 'record-main'), node('span', `${row?.responses || 0} response(s)`, 'badge'));
+            record.append(node('div', `Rating ${rating}`, 'record-main'), node('span', `${row?.responses || 0} response(s)`, 'badge'));
             distributionList.append(record);
         }
         distribution.append(distributionList);
         output.append(distribution);
+        const completedEvents = panel('Completed event reports');
+        addReportTable(
+            completedEvents,
+            ['Event', 'Date completed', 'Proposer / partners', 'Responses', 'Average score', 'Report'],
+            result.completed_events,
+            item => [
+                item.title,
+                dashboardDate(item.completed_date, { month: 'short', day: 'numeric', year: 'numeric' }),
+                item.partner_count,
+                item.response_count,
+                item.average_score === null ? '—' : item.average_score,
+                button('View Report', `viewevaluationreport${item.id}`, 'button button-quiet button-small')
+            ]
+        );
+        completedEvents.querySelectorAll('button[id^="viewevaluationreport"]').forEach(viewButton => {
+            viewButton.addEventListener('click', () => openEvaluationEventReport(viewButton.id.replace('viewevaluationreport', '')));
+        });
+        if (!result.completed_events.length) {
+            completedEvents.append(node('p', 'No completed events in this date range.'));
+        }
+        output.append(completedEvents);
+        const formQuestionSummaries = panel('Form question response breakdowns');
+        if (!result.form_question_summaries.length) {
+            formQuestionSummaries.append(node('p', 'No dynamic evaluation-form responses in this date range.'));
+        } else {
+            const breakdowns = node('div', undefined, 'record-list');
+            result.form_question_summaries.forEach(item => {
+                const record = node('article', undefined, 'record evaluation-breakdown-record');
+                const detail = node('div', undefined, 'record-main');
+                detail.append(node('strong', `${item.event_title} · ${item.question}`));
+                const counts = item.distribution.map(value => `${value.value}: ${value.responses}`).join(' · ');
+                detail.append(node('small', item.type === 'rating'
+                    ? `${item.responses} response(s) · Average ${item.average_rating} · ${counts}`
+                    : `${item.responses} response(s) · ${counts}`));
+                record.append(detail);
+                breakdowns.append(record);
+            });
+            formQuestionSummaries.append(breakdowns);
+        }
+        output.append(formQuestionSummaries);
+        const formResponses = panel('Submitted evaluation forms');
+        if (!result.form_responses.length) {
+            formResponses.append(node('p', 'No submitted form responses in this date range.'));
+        } else {
+            const responses = node('div', undefined, 'record-list');
+            result.form_responses.forEach(item => {
+                const record = node('article', undefined, 'record evaluation-response-record');
+                const detail = node('div', undefined, 'record-main');
+                detail.append(node('strong', `${item.event_title} · ${item.volunteer}`));
+                detail.append(node('small', `${item.project_title} · ${dashboardDate(item.submitted_at, { month: 'short', day: 'numeric', year: 'numeric' })}`));
+                item.answers.forEach(answer => {
+                    detail.append(node('small', `${answer.question}: ${answer.answer}`));
+                });
+                record.append(detail);
+                responses.append(record);
+            });
+            formResponses.append(responses);
+        }
+        output.append(formResponses);
         const responses = panel('Volunteer responses');
         addReportTable(responses, ['Event', 'Project', 'Volunteer', 'Rating', 'Feedback', 'Submitted'], result.evaluations,
             item => [item.event_title, item.project_title, item.volunteer, `${item.rating} / 5`, item.feedback, dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })]);
@@ -3836,6 +4345,124 @@ async function renderEvaluationReports() {
     section.append(form);
     pageContent.append(section, output);
     await loadReports();
+}
+
+async function openEvaluationEventReport(eventId) {
+    try {
+        const result = await request(`/evaluation-reports/events/${encodeURIComponent(eventId)}`);
+        const section = panel(
+            `${result.event.title} · Evaluation Report`,
+            `${result.event.project_title} · Completed ${dashboardDate(result.event.last_event_date, { month: 'long', day: 'numeric', year: 'numeric' })}`
+        );
+        section.classList.add('evaluation-event-report');
+        const summary = node('div', undefined, 'dashboard-metrics');
+        [
+            ['Total responses', result.summary.responses],
+            ['Average rating', result.summary.average_rating ?? '—'],
+            ['Rating answers', result.summary.ratings_count]
+        ].forEach(([label, value]) => {
+            const card = node('article', undefined, 'metric-card dashboard-metric');
+            card.append(node('span', label), node('strong', value));
+            summary.append(card);
+        });
+        section.append(summary);
+        const distributionPanel = panel('Rating distribution');
+        const bars = node('div', undefined, 'evaluation-rating-bars');
+        const maxRating = Math.max(result.summary.rating_scale_max, ...result.summary.rating_distribution.map(item => Number(item.rating)));
+        for (let rating = maxRating; rating >= 1; rating--) {
+            const count = result.summary.rating_distribution.find(item => Number(item.rating) === rating)?.responses || 0;
+            const row = node('div', undefined, 'evaluation-rating-bar');
+            row.append(node('span', `Rating ${rating}`));
+            const track = node('div', undefined, 'evaluation-rating-track');
+            const fill = node('span', undefined, 'evaluation-rating-fill');
+            fill.style.width = `${result.summary.ratings_count ? count / result.summary.ratings_count * 100 : 0}%`;
+            track.append(fill);
+            row.append(track, node('strong', count));
+            bars.append(row);
+        }
+        distributionPanel.append(bars);
+        section.append(distributionPanel);
+        const questionPanel = panel('Per-question summaries');
+        if (!result.question_summaries.length) questionPanel.append(node('p', 'No dynamic form responses were submitted.'));
+        else {
+            const records = node('div', undefined, 'record-list');
+            result.question_summaries.forEach(question => {
+                const record = node('article', undefined, 'record evaluation-breakdown-record');
+                const detail = node('div', undefined, 'record-main');
+                detail.append(node('strong', question.question));
+                const counts = question.distribution.map(value => `${value.value}: ${value.responses}`).join(' · ');
+                detail.append(node('small', question.type === 'rating'
+                    ? `${question.responses} response(s) · Average ${question.average_rating} · ${counts}`
+                    : `${question.responses} response(s) · ${counts}`));
+                if (question.distribution.length && question.type === 'rating') {
+                    const maxCount = Math.max(...question.distribution.map(item => Number(item.responses)));
+                    const chart = node('div', undefined, 'evaluation-rating-bars evaluation-question-chart');
+                    question.distribution.forEach(item => {
+                        const bar = node('div', undefined, 'evaluation-rating-bar');
+                        bar.append(node('span', `Rating ${item.value}`));
+                        const track = node('div', undefined, 'evaluation-rating-track');
+                        const fill = node('span', undefined, 'evaluation-rating-fill');
+                        fill.style.width = `${Number(item.responses) / maxCount * 100}%`;
+                        track.append(fill);
+                        bar.append(track, node('strong', item.responses));
+                        chart.append(bar);
+                    });
+                    detail.append(chart);
+                } else if (question.distribution.length && ['multiple_choice', 'checkboxes', 'dropdown'].includes(question.type)) {
+                    const total = question.distribution.reduce((sum, item) => sum + Number(item.responses), 0);
+                    const colors = ['#176a55', '#4b8e63', '#82ad6b', '#c4b35e', '#d28a55', '#a76562', '#747da0'];
+                    let currentPercent = 0;
+                    const stops = question.distribution.map((item, index) => {
+                        const start = currentPercent;
+                        currentPercent += Number(item.responses) / Math.max(1, total) * 100;
+                        return `${colors[index % colors.length]} ${start}% ${currentPercent}%`;
+                    });
+                    const chart = node('div', undefined, 'evaluation-choice-chart');
+                    const donut = node('div', undefined, 'evaluation-choice-donut');
+                    donut.style.background = `conic-gradient(${stops.join(', ')})`;
+                    donut.setAttribute('role', 'img');
+                    donut.setAttribute('aria-label', `${question.question} response distribution`);
+                    const legend = node('ul', undefined, 'evaluation-choice-legend');
+                    question.distribution.forEach((item, index) => {
+                        const entry = node('li');
+                        const swatch = node('span', undefined, 'evaluation-choice-swatch');
+                        swatch.style.backgroundColor = colors[index % colors.length];
+                        entry.append(swatch, node('span', `${item.value}: ${item.responses}`));
+                        legend.append(entry);
+                    });
+                    chart.append(donut, legend);
+                    detail.append(chart);
+                }
+                record.append(detail);
+                records.append(record);
+            });
+            questionPanel.append(records);
+        }
+        section.append(questionPanel);
+        const feedbackPanel = panel('Open-ended feedback');
+        if (!result.open_feedback.length) feedbackPanel.append(node('p', 'No open-ended feedback was provided.'));
+        else {
+            const records = node('div', undefined, 'record-list');
+            result.open_feedback.forEach(entry => {
+                const record = node('article', undefined, 'record');
+                const detail = node('div', undefined, 'record-main');
+                detail.append(node('strong', entry.question));
+                detail.append(node('small', `${entry.volunteer} · ${dashboardDate(entry.submitted_at, { month: 'short', day: 'numeric', year: 'numeric' })}`));
+                detail.append(node('p', entry.answer));
+                record.append(detail);
+                records.append(record);
+            });
+            feedbackPanel.append(records);
+        }
+        section.append(feedbackPanel);
+        const close = button('Close report', 'closeevaluationreport', 'button button-quiet');
+        close.addEventListener('click', () => section.remove());
+        section.append(close);
+        pageContent.prepend(section);
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+        showMessage(pageMessage, error.message, 'error');
+    }
 }
 
 async function renderEventHistory() {

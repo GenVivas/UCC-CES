@@ -89,6 +89,18 @@ final class ApiController
         if ($path === '/evaluation-reports' && $method === 'GET') {
             $this->evaluationReports();
         }
+        if (preg_match('#^/evaluation-reports/events/([0-9]+)$#', $path, $matches) && $method === 'GET') {
+            $this->evaluationEventReport(Http::positiveId($matches[1]));
+        }
+        if ($path === '/evaluation-forms' && $method === 'GET') {
+            $this->listEvaluationForms();
+        }
+        if (preg_match('#^/events/([0-9]+)/evaluation-form$#', $path, $matches) && $method === 'GET') {
+            $this->getEvaluationForm(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/events/([0-9]+)/evaluation-form$#', $path, $matches) && $method === 'PUT') {
+            $this->saveEvaluationForm(Http::positiveId($matches[1]));
+        }
         if ($path === '/event-history' && $method === 'GET') {
             $this->eventHistory();
         }
@@ -143,6 +155,12 @@ final class ApiController
         if ($path === '/volunteer/evaluations' && $method === 'POST') {
             $this->createVolunteerEvaluation();
         }
+        if (preg_match('#^/volunteer/evaluations/([0-9]+)/form$#', $path, $matches) && $method === 'GET') {
+            $this->getVolunteerEvaluationForm(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/volunteer/evaluations/([0-9]+)$#', $path, $matches) && $method === 'POST') {
+            $this->submitVolunteerEvaluationForm(Http::positiveId($matches[1]));
+        }
         if ($path === '/volunteer/documentations' && $method === 'GET') {
             $this->volunteerDocumentations();
         }
@@ -178,6 +196,9 @@ final class ApiController
         }
         if (preg_match('#^/proposals/([0-9]+)/brief\.pdf$#', $path, $matches) && $method === 'GET') {
             $this->downloadProjectBrief(Http::positiveId($matches[1]));
+        }
+        if (preg_match('#^/proposals/([0-9]+)/signature$#', $path, $matches) && $method === 'GET') {
+            $this->downloadProposalSignature(Http::positiveId($matches[1]));
         }
         if (preg_match('#^/proposals/([0-9]+)$#', $path, $matches) && $method === 'PUT') {
             $this->updateProposal(Http::positiveId($matches[1]));
@@ -317,6 +338,15 @@ final class ApiController
         }
         if ($path === '/evaluation-reports') {
             Http::requireRole('admin', 'partner');
+        }
+        if ($path === '/evaluation-forms' || preg_match('#^/events/[0-9]+/evaluation-form$#', $path)) {
+            Http::requireRole('admin', 'partner');
+        }
+        if (preg_match('#^/evaluation-reports/events/[0-9]+$#', $path)) {
+            Http::requireRole('admin', 'partner');
+        }
+        if (preg_match('#^/volunteer/evaluations(?:/|$)#', $path)) {
+            Http::requireRole('volunteer');
         }
         if ($path === '/activity-logs') {
             Http::requireRole('admin');
@@ -769,7 +799,7 @@ final class ApiController
         }
         $whereSql = implode(' AND ', $where);
         $rowsQuery =
-            "SELECT ve.id, e.title AS event_title, p.title AS project_title,
+            "SELECT ve.id, e.id AS event_id, e.title AS event_title, p.title AS project_title,
                     CONCAT(u.first_name, ' ', u.last_name) AS volunteer,
                     ve.rating, ve.feedback, ve.created_at
              FROM volunteer_event_evaluations ve
@@ -799,18 +829,670 @@ final class ApiController
              WHERE $whereSql GROUP BY ve.rating ORDER BY ve.rating"
         );
         $distribution->execute($params);
+        $globalRatingDistribution = [];
+        foreach ($distribution->fetchAll() as $distributionRow) {
+            $ratingValue = (int) $distributionRow['rating'];
+            $globalRatingDistribution[$ratingValue] = (int) $distributionRow['responses'];
+        }
+        $formWhere = ['er.submitted_at >= ?', 'er.submitted_at < DATE_ADD(?, INTERVAL 1 DAY)'];
+        $formParams = [$from, $to];
+        if ($user['role'] === 'partner') {
+            $formWhere[] = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+            ))';
+            array_push($formParams, (int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']);
+        }
+        $formResponsesQuery = $this->db->prepare(
+            'SELECT er.id, e.id AS event_id, e.title AS event_title, p.title AS project_title,
+                    CONCAT(u.first_name, \' \', u.last_name) AS volunteer,
+                    er.answers, er.questions_snapshot, er.submitted_at
+             FROM evaluation_responses er
+             JOIN events e ON e.id = er.event_id
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN users u ON u.id = er.volunteer_user_id
+             WHERE ' . implode(' AND ', $formWhere) . '
+             ORDER BY er.submitted_at DESC, er.id DESC'
+        );
+        $formResponsesQuery->execute($formParams);
+        $formResponses = [];
+        $questionSummaryMap = [];
+        $ratingTotal = 0;
+        $ratingCount = 0;
+        $formRatingByEvent = [];
+        $positiveResponses = 0;
+        $negativeResponses = 0;
+        $evaluatedEvents = [];
+        $globalRatingScaleMax = 5;
+        foreach ($formResponsesQuery->fetchAll() as $response) {
+            $evaluatedEvents[(string) $response['event_id']] = true;
+            $answers = json_decode((string) $response['answers'], true);
+            $snapshot = json_decode((string) $response['questions_snapshot'], true);
+            $answers = is_array($answers) ? $answers : [];
+            $snapshot = is_array($snapshot) ? $snapshot : [];
+            $answerDetails = [];
+            foreach ($snapshot as $question) {
+                if (!is_array($question) || !isset($question['id'], $question['text'], $question['type'])) {
+                    continue;
+                }
+                $questionId = (string) $question['id'];
+                if (!array_key_exists($questionId, $answers)) {
+                    continue;
+                }
+                $answer = $answers[$questionId];
+                $answerDetails[] = [
+                    'question' => (string) $question['text'],
+                    'type' => (string) $question['type'],
+                    'answer' => is_array($answer) ? implode(', ', array_map('strval', $answer)) : (string) $answer,
+                ];
+                $summaryKey = (int) $response['event_id'] . ':' . $questionId;
+                if (!isset($questionSummaryMap[$summaryKey])) {
+                    $questionSummaryMap[$summaryKey] = [
+                        'event_title' => $response['event_title'],
+                        'question' => (string) $question['text'],
+                        'type' => (string) $question['type'],
+                        'responses' => 0,
+                        'average_rating' => null,
+                        'distribution' => [],
+                        'rating_total' => 0,
+                        'rating_answers' => 0,
+                    ];
+                }
+                $questionSummaryMap[$summaryKey]['responses']++;
+                $values = is_array($answer) ? $answer : [$answer];
+                foreach ($values as $value) {
+                    $value = (string) $value;
+                    $questionSummaryMap[$summaryKey]['distribution'][$value] =
+                        ($questionSummaryMap[$summaryKey]['distribution'][$value] ?? 0) + 1;
+                    if ($question['type'] === 'rating' && ctype_digit($value)) {
+                        $rating = (int) $value;
+                        $ratingTotal += $rating;
+                        $ratingCount++;
+                        $ratingMaximum = (int) ($question['settings']['max'] ?? 5);
+                        $globalRatingScaleMax = max($globalRatingScaleMax, $ratingMaximum);
+                        if ($rating >= (int) ceil($ratingMaximum * 0.6)) {
+                            $positiveResponses++;
+                        } else {
+                            $negativeResponses++;
+                        }
+                        $globalRatingDistribution[$rating] = ($globalRatingDistribution[$rating] ?? 0) + 1;
+                        $questionSummaryMap[$summaryKey]['rating_total'] += $rating;
+                        $questionSummaryMap[$summaryKey]['rating_answers']++;
+                        $eventKey = (string) $response['event_id'];
+                        $formRatingByEvent[$eventKey]['total'] = ($formRatingByEvent[$eventKey]['total'] ?? 0) + $rating;
+                        $formRatingByEvent[$eventKey]['count'] = ($formRatingByEvent[$eventKey]['count'] ?? 0) + 1;
+                    }
+                }
+            }
+            $formResponses[] = [
+                'event_id' => (int) $response['event_id'],
+                'event_title' => $response['event_title'],
+                'project_title' => $response['project_title'],
+                'volunteer' => $response['volunteer'],
+                'answers' => $answerDetails,
+                'submitted_at' => $response['submitted_at'],
+            ];
+        }
+        $questionSummaries = [];
+        foreach ($questionSummaryMap as $summaryRow) {
+            if ($summaryRow['type'] === 'rating') {
+                $summaryRow['average_rating'] = round(
+                    $summaryRow['rating_total'] / max(1, $summaryRow['rating_answers']),
+                    2
+                );
+            }
+            unset($summaryRow['rating_total'], $summaryRow['rating_answers']);
+            $summaryRow['distribution'] = array_map(
+                static fn (mixed $value, mixed $count): array => [
+                    'value' => (string) $value,
+                    'responses' => (int) $count,
+                ],
+                array_keys($summaryRow['distribution']),
+                array_values($summaryRow['distribution'])
+            );
+            $questionSummaries[] = $summaryRow;
+        }
+        $completedWhere = [
+            '(SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) < CURDATE()',
+            '(SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) BETWEEN ? AND ?',
+        ];
+        $completedParams = [$from, $to];
+        if ($user['role'] === 'partner') {
+            $completedWhere[] = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+            ))';
+            array_push($completedParams, (int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']);
+        }
+        $completedStatement = $this->db->prepare(
+            "SELECT e.id, e.title, p.title AS project_title,
+                    MAX(ed.event_date) AS completed_date,
+                    (SELECT COUNT(*) FROM volunteer_event_evaluations ve WHERE ve.event_id = e.id)
+                    + (SELECT COUNT(*) FROM evaluation_responses er WHERE er.event_id = e.id) AS response_count,
+                    (1
+                     + (SELECT COUNT(DISTINCT ep.partner_user_id) FROM event_partners ep
+                        WHERE ep.event_id = e.id AND ep.partner_user_id <> p.owner_user_id)
+                     + (SELECT COUNT(DISTINCT pp.partner_user_id) FROM proposal_partners pp
+                        WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
+                          AND pp.partner_user_id <> p.owner_user_id
+                          AND NOT EXISTS (
+                              SELECT 1 FROM event_partners ep
+                              WHERE ep.event_id = e.id AND ep.partner_user_id = pp.partner_user_id
+                          ))) AS partner_count
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_dates ed ON ed.event_id = e.id
+             WHERE p.status IN ('approved', 'active') AND " . implode(' AND ', $completedWhere) . '
+             GROUP BY e.id, e.title, p.id, p.owner_user_id, p.title
+             ORDER BY completed_date DESC, e.title'
+        );
+        $completedStatement->execute($completedParams);
+        $completedEvents = $completedStatement->fetchAll();
+        $legacyByEvent = [];
+        $legacyRatingTotal = 0;
+        foreach ($rows as $row) {
+            $eventKey = (string) $row['event_id'];
+            $evaluatedEvents[$eventKey] = true;
+            $legacyByEvent[$eventKey]['total'] = ($legacyByEvent[$eventKey]['total'] ?? 0) + (int) $row['rating'];
+            $legacyByEvent[$eventKey]['count'] = ($legacyByEvent[$eventKey]['count'] ?? 0) + 1;
+            $legacyRatingTotal += (int) $row['rating'];
+            if ((int) $row['rating'] >= 4) {
+                $positiveResponses++;
+            } else {
+                $negativeResponses++;
+            }
+        }
+        foreach ($completedEvents as &$completedEvent) {
+            $eventKey = (string) $completedEvent['id'];
+            $legacy = $legacyByEvent[$eventKey] ?? ['total' => 0, 'count' => 0];
+            $formRatingTotal = (int) ($formRatingByEvent[$eventKey]['total'] ?? 0);
+            $formRatingCount = (int) ($formRatingByEvent[$eventKey]['count'] ?? 0);
+            $eventRatingTotal = $legacy['total'] + $formRatingTotal;
+            $eventRatingCount = $legacy['count'] + $formRatingCount;
+            $completedEvent['response_count'] = (int) $completedEvent['response_count'];
+            $completedEvent['partner_count'] = (int) $completedEvent['partner_count'];
+            $completedEvent['average_score'] = $eventRatingCount > 0
+                ? round($eventRatingTotal / $eventRatingCount, 2)
+                : null;
+        }
+        unset($completedEvent);
+        $eligibleParticipantsStatement = $this->db->prepare(
+            "SELECT COUNT(DISTINCT CONCAT(e.id, ':', ea.volunteer_user_id))
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN event_applications ea ON ea.event_id = e.id AND ea.status = 'approved'
+             JOIN attendance a ON a.application_id = ea.id AND a.status = 'present'
+             WHERE p.status IN ('approved', 'active')
+               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) BETWEEN ? AND ?
+               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) < CURDATE()" .
+                ($user['role'] === 'partner' ? ' AND (e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                    SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+                ) OR EXISTS (
+                    SELECT 1 FROM proposal_partners pp WHERE pp.proposal_id = p.id
+                      AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+                ))' : '')
+        );
+        $eligibleParticipantsStatement->execute($user['role'] === 'partner'
+            ? array_merge([$from, $to], array_fill(0, 4, (int) $user['id']))
+            : [$from, $to]);
+        $totalResponses = (int) $summary['responses'] + count($formResponses);
+        $totalRatingCount = (int) $summary['responses'] + $ratingCount;
+        $totalRating = $legacyRatingTotal + $ratingTotal;
+        ksort($globalRatingDistribution);
+        $eligibleParticipants = (int) $eligibleParticipantsStatement->fetchColumn();
         Http::json([
             'from' => $from,
             'to' => $to,
             'summary' => [
-                'responses' => (int) ($summary['responses'] ?? 0),
-                'average_rating' => round((float) ($summary['average_rating'] ?? 0), 2),
-                'positive_responses' => (int) ($summary['positive_responses'] ?? 0),
-                'events_evaluated' => (int) ($summary['events_evaluated'] ?? 0),
+                'responses' => $totalResponses,
+                'average_rating' => $totalRatingCount > 0 ? round($totalRating / $totalRatingCount, 2) : 0,
+                'rating_scale_max' => $globalRatingScaleMax,
+                'positive_responses' => $positiveResponses,
+                'negative_responses' => $negativeResponses,
+                'rated_answers' => $positiveResponses + $negativeResponses,
+                'events_evaluated' => count($evaluatedEvents),
+                'eligible_participants' => $eligibleParticipants,
+                'completion_rate' => $eligibleParticipants > 0
+                    ? round(min(100, ($totalResponses / $eligibleParticipants) * 100), 1)
+                    : 0,
             ],
-            'distribution' => $distribution->fetchAll(),
+            'distribution' => array_map(
+                static fn (int|string $rating, int $responses): array => ['rating' => (int) $rating, 'responses' => $responses],
+                array_keys($globalRatingDistribution),
+                array_values($globalRatingDistribution)
+            ),
             'evaluations' => $rows,
+            'form_summary' => [
+                'responses' => count($formResponses),
+                'average_rating' => $ratingCount > 0 ? round($ratingTotal / $ratingCount, 2) : null,
+                'rating_answers' => $ratingCount,
+            ],
+            'form_question_summaries' => $questionSummaries,
+            'form_responses' => $formResponses,
+            'completed_events' => $completedEvents,
         ]);
+    }
+
+    private function listEvaluationForms(): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $where = [
+            "p.status IN ('approved', 'active')",
+            'EXISTS (SELECT 1 FROM event_dates eligible_date WHERE eligible_date.event_id = e.id AND eligible_date.event_date >= CURDATE())',
+        ];
+        $params = [];
+        if ($user['role'] === 'partner') {
+            $where[] = '(e.organizer_user_id = ? OR p.owner_user_id = ? OR EXISTS (
+                SELECT 1 FROM event_partners ep WHERE ep.event_id = e.id AND ep.partner_user_id = ?
+            ) OR EXISTS (
+                SELECT 1 FROM proposal_partners pp
+                WHERE pp.proposal_id = p.id AND pp.partner_user_id = ? AND pp.invitation_status = \'accepted\'
+            ))';
+            array_push($params, (int) $user['id'], (int) $user['id'], (int) $user['id'], (int) $user['id']);
+        }
+        $statement = $this->db->prepare(
+            "SELECT e.id, e.title, e.venue, p.id AS proposal_id, p.title AS project_title,
+                    p.proposer_name, p.status AS proposal_status,
+                    (SELECT MIN(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS first_event_date,
+                    (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS last_event_date,
+                    (SELECT GROUP_CONCAT(DISTINCT partner.organization_name
+                                         ORDER BY partner.organization_name SEPARATOR ', ')
+                     FROM partners partner
+                     WHERE partner.user_id = p.owner_user_id
+                        OR partner.user_id IN (SELECT ep.partner_user_id FROM event_partners ep WHERE ep.event_id = e.id)
+                        OR partner.user_id IN (
+                            SELECT pp.partner_user_id FROM proposal_partners pp
+                            WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
+                        )) AS partner_name,
+                    ef.id AS form_id, ef.title AS form_title, ef.status AS form_status, ef.is_active,
+                    (SELECT COUNT(*) FROM evaluation_responses er WHERE er.form_id = ef.id) AS response_count
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             LEFT JOIN evaluation_forms ef ON ef.event_id = e.id
+             WHERE " . implode(' AND ', $where) . '
+             ORDER BY first_event_date, e.title'
+        );
+        $statement->execute($params);
+        Http::json(['events' => $statement->fetchAll()]);
+    }
+
+    private function evaluationEventReport(int $eventId): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $this->assertEventOrganizer($eventId, $user);
+        $event = $this->evaluationEventDetails($eventId);
+        if (!in_array($event['proposal_status'], ['approved', 'active'], true) ||
+            !$event['last_event_date'] || $event['last_event_date'] >= date('Y-m-d')) {
+            throw new RuntimeException('Detailed evaluation reports are available after an event is completed.', 409);
+        }
+        $legacyQuery = $this->db->prepare(
+            "SELECT CONCAT(u.first_name, ' ', u.last_name) AS volunteer,
+                    ve.rating, ve.feedback, ve.created_at
+             FROM volunteer_event_evaluations ve
+             JOIN users u ON u.id = ve.volunteer_user_id
+             WHERE ve.event_id = ?
+             ORDER BY ve.created_at DESC, ve.id DESC"
+        );
+        $legacyQuery->execute([$eventId]);
+        $legacyResponses = $legacyQuery->fetchAll();
+
+        $responseQuery = $this->db->prepare(
+            "SELECT CONCAT(u.first_name, ' ', u.last_name) AS volunteer,
+                    er.answers, er.questions_snapshot, er.submitted_at
+             FROM evaluation_responses er
+             JOIN users u ON u.id = er.volunteer_user_id
+             WHERE er.event_id = ?
+             ORDER BY er.submitted_at DESC, er.id DESC"
+        );
+        $responseQuery->execute([$eventId]);
+        $formResponses = [];
+        $questionSummaryMap = [];
+        $ratings = [];
+        $ratingScaleMax = 5;
+        $feedback = [];
+        foreach ($legacyResponses as $response) {
+            $ratings[] = (int) $response['rating'];
+            if (trim((string) $response['feedback']) !== '') {
+                $feedback[] = [
+                    'volunteer' => $response['volunteer'],
+                    'question' => 'Overall feedback',
+                    'answer' => (string) $response['feedback'],
+                    'submitted_at' => $response['created_at'],
+                ];
+            }
+        }
+        foreach ($responseQuery->fetchAll() as $response) {
+            $answers = json_decode((string) $response['answers'], true);
+            $snapshot = json_decode((string) $response['questions_snapshot'], true);
+            $answers = is_array($answers) ? $answers : [];
+            $snapshot = is_array($snapshot) ? $snapshot : [];
+            $answerDetails = [];
+            foreach ($snapshot as $question) {
+                if (!is_array($question) || !isset($question['id'], $question['text'], $question['type'])) {
+                    continue;
+                }
+                $questionId = (string) $question['id'];
+                if (!array_key_exists($questionId, $answers)) {
+                    continue;
+                }
+                $answer = $answers[$questionId];
+                $answerText = is_array($answer) ? implode(', ', array_map('strval', $answer)) : (string) $answer;
+                $type = (string) $question['type'];
+                if ($type === 'rating') {
+                    $ratingScaleMax = max($ratingScaleMax, (int) ($question['settings']['max'] ?? 5));
+                }
+                $answerDetails[] = ['question' => (string) $question['text'], 'type' => $type, 'answer' => $answerText];
+                $key = $questionId;
+                if (!isset($questionSummaryMap[$key])) {
+                    $questionSummaryMap[$key] = [
+                        'question' => (string) $question['text'],
+                        'type' => $type,
+                        'responses' => 0,
+                        'rating_total' => 0,
+                        'rating_answers' => 0,
+                        'distribution' => [],
+                    ];
+                }
+                $questionSummaryMap[$key]['responses']++;
+                $values = is_array($answer) ? $answer : [$answer];
+                foreach ($values as $value) {
+                    $value = (string) $value;
+                    $questionSummaryMap[$key]['distribution'][$value] =
+                        ($questionSummaryMap[$key]['distribution'][$value] ?? 0) + 1;
+                    if ($type === 'rating' && ctype_digit($value)) {
+                        $ratings[] = (int) $value;
+                        $questionSummaryMap[$key]['rating_total'] += (int) $value;
+                        $questionSummaryMap[$key]['rating_answers']++;
+                    } elseif (in_array($type, ['short_answer', 'paragraph'], true) && trim($value) !== '') {
+                        $feedback[] = [
+                            'volunteer' => $response['volunteer'],
+                            'question' => (string) $question['text'],
+                            'answer' => $value,
+                            'submitted_at' => $response['submitted_at'],
+                        ];
+                    }
+                }
+            }
+            $formResponses[] = [
+                'volunteer' => $response['volunteer'],
+                'answers' => $answerDetails,
+                'submitted_at' => $response['submitted_at'],
+            ];
+        }
+        $questionSummaries = [];
+        foreach ($questionSummaryMap as $summary) {
+            $summary['average_rating'] = $summary['type'] === 'rating' && $summary['rating_answers'] > 0
+                ? round($summary['rating_total'] / $summary['rating_answers'], 2)
+                : null;
+            unset($summary['rating_total'], $summary['rating_answers']);
+            $summary['distribution'] = array_map(
+                static fn (mixed $value, mixed $count): array => [
+                    'value' => (string) $value,
+                    'responses' => (int) $count,
+                ],
+                array_keys($summary['distribution']),
+                array_values($summary['distribution'])
+            );
+            $questionSummaries[] = $summary;
+        }
+        $ratingDistribution = [];
+        foreach ($ratings as $rating) {
+            $ratingDistribution[$rating] = ($ratingDistribution[$rating] ?? 0) + 1;
+        }
+        ksort($ratingDistribution);
+        $responseCount = count($legacyResponses) + count($formResponses);
+        Http::json([
+            'event' => $event,
+            'summary' => [
+                'responses' => $responseCount,
+                'average_rating' => $ratings ? round(array_sum($ratings) / count($ratings), 2) : null,
+                'ratings_count' => count($ratings),
+                'rating_scale_max' => $ratingScaleMax,
+                'rating_distribution' => array_map(
+                    static fn (int|string $rating, int $count): array => ['rating' => (int) $rating, 'responses' => $count],
+                    array_keys($ratingDistribution),
+                    array_values($ratingDistribution)
+                ),
+            ],
+            'question_summaries' => $questionSummaries,
+            'open_feedback' => $feedback,
+            'legacy_responses' => $legacyResponses,
+            'form_responses' => $formResponses,
+        ]);
+    }
+
+    private function getEvaluationForm(int $eventId): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $this->assertEvaluationEventManager($eventId, $user);
+        $event = $this->evaluationEventDetails($eventId);
+        $form = $this->db->prepare(
+            'SELECT id, title, description, status, is_active, updated_at
+             FROM evaluation_forms WHERE event_id = ?'
+        );
+        $form->execute([$eventId]);
+        $formData = $form->fetch();
+        $questions = [];
+        if ($formData) {
+            $query = $this->db->prepare(
+                'SELECT id, question_text, question_type, is_required, settings, sort_order
+                 FROM evaluation_questions WHERE form_id = ? ORDER BY sort_order, id'
+            );
+            $query->execute([(int) $formData['id']]);
+            foreach ($query->fetchAll() as $question) {
+                $settings = json_decode((string) $question['settings'], true);
+                $questions[] = [
+                    'id' => (int) $question['id'],
+                    'text' => $question['question_text'],
+                    'type' => $question['question_type'],
+                    'required' => (bool) $question['is_required'],
+                    'settings' => is_array($settings) ? $settings : [],
+                ];
+            }
+        }
+        Http::json(['event' => $event, 'form' => $formData, 'questions' => $questions]);
+    }
+
+    private function saveEvaluationForm(int $eventId): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $this->assertEvaluationEventManager($eventId, $user);
+        $this->evaluationEventDetails($eventId);
+        $data = Http::body();
+        $title = trim(is_string($data['title'] ?? null) ? $data['title'] : '');
+        $descriptionValue = $data['description'] ?? '';
+        $status = $data['status'] ?? '';
+        $active = $data['active'] ?? false;
+        if ($title === '' || mb_strlen($title, 'UTF-8') > 190) {
+            throw new RuntimeException('Enter a form title of no more than 190 characters.');
+        }
+        if (!is_string($descriptionValue) || mb_strlen($descriptionValue, 'UTF-8') > 5000) {
+            throw new RuntimeException('Form description must be text of no more than 5,000 characters.');
+        }
+        if (!in_array($status, ['draft', 'published'], true)) {
+            throw new RuntimeException('Choose whether to save the form as a draft or publish it.');
+        }
+        if (!is_bool($active)) {
+            throw new RuntimeException('Form active status must be true or false.');
+        }
+        $questions = $this->normalizeEvaluationQuestions($data['questions'] ?? null);
+        if ($status === 'published' && $questions === []) {
+            throw new RuntimeException('Add at least one question before publishing the evaluation form.');
+        }
+        if ($status !== 'published') {
+            $active = false;
+        }
+
+        $this->db->beginTransaction();
+        try {
+            $lockEvent = $this->db->prepare('SELECT id FROM events WHERE id = ? FOR UPDATE');
+            $lockEvent->execute([$eventId]);
+            if (!$lockEvent->fetchColumn()) {
+                throw new RuntimeException('Event was not found.', 404);
+            }
+            $find = $this->db->prepare('SELECT id FROM evaluation_forms WHERE event_id = ? FOR UPDATE');
+            $find->execute([$eventId]);
+            $formId = $find->fetchColumn();
+            if ($formId) {
+                $update = $this->db->prepare(
+                    'UPDATE evaluation_forms
+                     SET title = ?, description = ?, status = ?, is_active = ?, created_by = ?
+                     WHERE id = ?'
+                );
+                $update->execute([
+                    $title,
+                    $descriptionValue !== '' ? $descriptionValue : null,
+                    $status,
+                    $active ? 1 : 0,
+                    (int) $user['id'],
+                    (int) $formId,
+                ]);
+                $this->db->prepare('DELETE FROM evaluation_questions WHERE form_id = ?')->execute([(int) $formId]);
+            } else {
+                $insert = $this->db->prepare(
+                    'INSERT INTO evaluation_forms (event_id, created_by, title, description, status, is_active)
+                     VALUES (?, ?, ?, ?, ?, ?)'
+                );
+                $insert->execute([
+                    $eventId,
+                    (int) $user['id'],
+                    $title,
+                    $descriptionValue !== '' ? $descriptionValue : null,
+                    $status,
+                    $active ? 1 : 0,
+                ]);
+                $formId = (int) $this->db->lastInsertId();
+            }
+            $insertQuestion = $this->db->prepare(
+                'INSERT INTO evaluation_questions (form_id, question_text, question_type, is_required, settings, sort_order)
+                 VALUES (?, ?, ?, ?, ?, ?)'
+            );
+            foreach ($questions as $index => $question) {
+                $insertQuestion->execute([
+                    (int) $formId,
+                    $question['text'],
+                    $question['type'],
+                    $question['required'] ? 1 : 0,
+                    json_encode($question['settings'], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                    $index,
+                ]);
+            }
+            $this->db->commit();
+        } catch (Throwable $exception) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            throw $exception;
+        }
+        $this->logActivity('evaluation.form_saved', 'event', $eventId, [
+            'status' => $status,
+            'active' => $active,
+            'question_count' => count($questions),
+        ]);
+        Http::json(['message' => $status === 'published' ? 'Evaluation form published.' : 'Evaluation form draft saved.']);
+    }
+
+    private function assertEvaluationEventManager(int $eventId, array $user): void
+    {
+        $this->assertEventOrganizer($eventId, $user);
+        $statement = $this->db->prepare(
+            "SELECT 1 FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE e.id = ? AND p.status IN ('approved', 'active')
+               AND EXISTS (
+                   SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date >= CURDATE()
+               )"
+        );
+        $statement->execute([$eventId]);
+        if (!$statement->fetchColumn()) {
+            throw new RuntimeException('Only approved or ongoing scheduled events can have an evaluation form.', 409);
+        }
+    }
+
+    private function evaluationEventDetails(int $eventId): array
+    {
+        $statement = $this->db->prepare(
+            "SELECT e.id, e.title, e.description, e.venue, p.title AS project_title, p.proposer_name,
+                    p.status AS proposal_status,
+                    (SELECT MIN(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS first_event_date,
+                    (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS last_event_date,
+                    (SELECT GROUP_CONCAT(DISTINCT partner.organization_name
+                                         ORDER BY partner.organization_name SEPARATOR ', ')
+                     FROM partners partner
+                     WHERE partner.user_id = p.owner_user_id
+                        OR partner.user_id IN (SELECT ep.partner_user_id FROM event_partners ep WHERE ep.event_id = e.id)
+                        OR partner.user_id IN (
+                            SELECT pp.partner_user_id FROM proposal_partners pp
+                            WHERE pp.proposal_id = p.id AND pp.invitation_status = 'accepted'
+                        )) AS partner_name
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE e.id = ?"
+        );
+        $statement->execute([$eventId]);
+        $event = $statement->fetch();
+        if (!$event) {
+            throw new RuntimeException('Event was not found.', 404);
+        }
+        return $event;
+    }
+
+    private function normalizeEvaluationQuestions(mixed $value): array
+    {
+        $allowedTypes = ['rating', 'multiple_choice', 'checkboxes', 'dropdown', 'short_answer', 'paragraph'];
+        if (!is_array($value) || count($value) > 40) {
+            throw new RuntimeException('An evaluation form can contain up to 40 questions.');
+        }
+        $questions = [];
+        foreach ($value as $question) {
+            if (!is_array($question)) {
+                throw new RuntimeException('Each evaluation question must be an object.');
+            }
+            $text = trim(is_string($question['text'] ?? null) ? $question['text'] : '');
+            $type = $question['type'] ?? '';
+            $required = $question['required'] ?? false;
+            $settings = $question['settings'] ?? [];
+            if ($text === '' || mb_strlen($text, 'UTF-8') > 500 ||
+                !is_string($type) || !in_array($type, $allowedTypes, true) ||
+                !is_bool($required) || !is_array($settings)) {
+                throw new RuntimeException('Enter valid question text, type, and required status for every question.');
+            }
+            if ($type === 'rating') {
+                $max = filter_var($settings['max'] ?? 5, FILTER_VALIDATE_INT);
+                if (!in_array($max, [5, 10], true)) {
+                    throw new RuntimeException('Rating questions must use a 1–5 or 1–10 scale.');
+                }
+                $settings = ['min' => 1, 'max' => $max];
+            } elseif (in_array($type, ['multiple_choice', 'checkboxes', 'dropdown'], true)) {
+                $options = $settings['options'] ?? null;
+                if (!is_array($options)) {
+                    throw new RuntimeException('Choice questions must include answer options.');
+                }
+                $options = array_map(
+                    static fn (mixed $option): string => is_string($option) ? trim($option) : '',
+                    $options
+                );
+                $options = array_values(array_unique(array_filter($options, static fn (string $option): bool => $option !== '')));
+                if (count($options) < 2 || count($options) > 20 ||
+                    array_filter($options, static fn (string $option): bool => mb_strlen($option, 'UTF-8') > 120) !== []) {
+                    throw new RuntimeException('Choice questions need 2–20 answer options of no more than 120 characters each.');
+                }
+                $settings = ['options' => $options];
+            } else {
+                $settings = [];
+            }
+            $questions[] = [
+                'text' => $text,
+                'type' => $type,
+                'required' => $required,
+                'settings' => $settings,
+            ];
+        }
+        return $questions;
     }
 
     private function eventHistory(): never
@@ -1334,13 +2016,48 @@ final class ApiController
                     WHERE a.application_id = ea.id AND a.status = 'present'
                )
                AND NOT EXISTS (
+                    SELECT 1 FROM evaluation_forms ef
+                    WHERE ef.event_id = e.id AND ef.status = 'published' AND ef.is_active = 1
+               )
+               AND NOT EXISTS (
                     SELECT 1 FROM volunteer_event_evaluations ve
                     WHERE ve.event_id = e.id AND ve.volunteer_user_id = ea.volunteer_user_id
                )
              ORDER BY e.title"
         );
         $eligible->execute([(int) $user['id'], date('Y-m-d')]);
-        Http::json(['evaluations' => $statement->fetchAll(), 'eligibleEvents' => $eligible->fetchAll()]);
+        $assigned = $this->db->prepare(
+            "SELECT e.id, e.title, p.title AS project_title,
+                    (SELECT MIN(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS first_event_date,
+                    (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) AS last_event_date,
+                    ef.id AS form_id, ef.title AS form_title,
+                    (er.id IS NOT NULL) AS has_responded, er.submitted_at
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             JOIN evaluation_forms ef ON ef.event_id = e.id
+             LEFT JOIN evaluation_responses er
+               ON er.form_id = ef.id AND er.volunteer_user_id = ?
+             WHERE p.status IN ('approved', 'active')
+               AND ef.status = 'published' AND ef.is_active = 1
+               AND (
+                   EXISTS (
+                       SELECT 1 FROM event_applications ea
+                       WHERE ea.event_id = e.id AND ea.volunteer_user_id = ? AND ea.status = 'approved'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM event_applications ea
+                       JOIN attendance a ON a.application_id = ea.id
+                       WHERE ea.event_id = e.id AND ea.volunteer_user_id = ? AND a.status = 'present'
+                   )
+               )
+             ORDER BY last_event_date DESC, e.title"
+        );
+        $assigned->execute([(int) $user['id'], (int) $user['id'], (int) $user['id']]);
+        Http::json([
+            'evaluations' => $statement->fetchAll(),
+            'eligibleEvents' => $eligible->fetchAll(),
+            'assignedEvents' => $assigned->fetchAll(),
+        ]);
     }
 
     private function createVolunteerEvaluation(): never
@@ -1367,6 +2084,10 @@ final class ApiController
                AND EXISTS (
                     SELECT 1 FROM attendance a
                     WHERE a.application_id = ea.id AND a.status = 'present'
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM evaluation_forms ef
+                    WHERE ef.event_id = e.id AND ef.status = 'published' AND ef.is_active = 1
                )"
         );
         $eligible->execute([$eventId, (int) $user['id'], date('Y-m-d')]);
@@ -1390,6 +2111,192 @@ final class ApiController
             'rating' => $rating,
         ]);
         Http::json(['id' => $evaluationId, 'message' => 'Evaluation submitted.'], 201);
+    }
+
+    private function getVolunteerEvaluationForm(int $eventId): never
+    {
+        $user = Http::requireRole('volunteer');
+        $this->assertVolunteerEventInvolvement($eventId, (int) $user['id']);
+        $form = $this->activeEvaluationForm($eventId);
+        $questions = $this->evaluationFormQuestions((int) $form['id']);
+        $existing = $this->db->prepare(
+            'SELECT submitted_at FROM evaluation_responses WHERE form_id = ? AND volunteer_user_id = ?'
+        );
+        $existing->execute([(int) $form['id'], (int) $user['id']]);
+        $submittedAt = $existing->fetchColumn();
+        if ($submittedAt) {
+            throw new RuntimeException('You have already submitted this event evaluation.', 409);
+        }
+        Http::json(['form' => $form, 'questions' => $questions]);
+    }
+
+    private function submitVolunteerEvaluationForm(int $eventId): never
+    {
+        $user = Http::requireRole('volunteer');
+        $this->assertVolunteerEventInvolvement($eventId, (int) $user['id']);
+        $form = $this->activeEvaluationForm($eventId);
+        $questions = $this->evaluationFormQuestions((int) $form['id']);
+        $data = Http::body();
+        $answers = $data['answers'] ?? null;
+        if (!is_array($answers)) {
+            throw new RuntimeException('Submit answers to the evaluation questions.');
+        }
+        $normalizedAnswers = [];
+        $questionSnapshot = [];
+        $questionIds = [];
+        foreach ($questions as $question) {
+            $questionId = (string) $question['id'];
+            $questionIds[] = $questionId;
+            $questionSnapshot[] = [
+                'id' => $question['id'],
+                'text' => $question['text'],
+                'type' => $question['type'],
+                'required' => $question['required'],
+                'settings' => $question['settings'],
+            ];
+            $answer = $answers[$questionId] ?? null;
+            $settings = $question['settings'];
+            $type = $question['type'];
+            if ($type === 'checkboxes') {
+                if ($answer === null || $answer === []) {
+                    if ($question['required']) {
+                        throw new RuntimeException('Answer every required evaluation question.');
+                    }
+                    continue;
+                }
+                if (!is_array($answer) || array_filter($answer, static fn (mixed $item): bool => !is_string($item)) !== []) {
+                    throw new RuntimeException('Select valid options for the checkbox question.');
+                }
+                $options = $settings['options'] ?? [];
+                $answer = array_values(array_unique($answer));
+                if (array_diff($answer, $options) !== []) {
+                    throw new RuntimeException('A checkbox answer contains an invalid option.');
+                }
+            } elseif ($type === 'rating') {
+                if ($answer === null || $answer === '') {
+                    if ($question['required']) {
+                        throw new RuntimeException('Answer every required evaluation question.');
+                    }
+                    continue;
+                }
+                $rating = filter_var($answer, FILTER_VALIDATE_INT);
+                if ($rating === false || $rating < 1 || $rating > (int) ($settings['max'] ?? 5)) {
+                    throw new RuntimeException('Choose a valid value for each rating question.');
+                }
+                $answer = $rating;
+            } else {
+                if (!is_string($answer)) {
+                    if ($answer === null && !$question['required']) {
+                        continue;
+                    }
+                    throw new RuntimeException('Enter a text answer or choose a valid option.');
+                }
+                $answer = trim($answer);
+                if ($answer === '') {
+                    if ($question['required']) {
+                        throw new RuntimeException('Answer every required evaluation question.');
+                    }
+                    continue;
+                }
+                if ($type === 'multiple_choice' || $type === 'dropdown') {
+                    if (!in_array($answer, $settings['options'] ?? [], true)) {
+                        throw new RuntimeException('Choose a valid option for each choice question.');
+                    }
+                } elseif (mb_strlen($answer, 'UTF-8') > ($type === 'short_answer' ? 300 : 5000)) {
+                    throw new RuntimeException('An evaluation text answer exceeds the maximum length.');
+                }
+            }
+            $normalizedAnswers[$questionId] = $answer;
+        }
+        if (array_diff(array_map('strval', array_keys($answers)), $questionIds) !== []) {
+            throw new RuntimeException('The submitted form contains an unknown question.');
+        }
+        try {
+            $insert = $this->db->prepare(
+                'INSERT INTO evaluation_responses
+                    (form_id, event_id, volunteer_user_id, answers, questions_snapshot)
+                 VALUES (?, ?, ?, ?, ?)'
+            );
+            $insert->execute([
+                (int) $form['id'],
+                $eventId,
+                (int) $user['id'],
+                json_encode($normalizedAnswers, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                json_encode($questionSnapshot, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+            ]);
+        } catch (\PDOException $exception) {
+            if ($exception->getCode() === '23000') {
+                throw new RuntimeException('You have already submitted this event evaluation.', 409, $exception);
+            }
+            throw $exception;
+        }
+        $responseId = (int) $this->db->lastInsertId();
+        $this->logActivity('volunteer.evaluation_form_submitted', 'evaluation_response', $responseId, [
+            'event_id' => $eventId,
+            'form_id' => (int) $form['id'],
+        ]);
+        Http::json(['id' => $responseId, 'message' => 'Evaluation submitted.'], 201);
+    }
+
+    private function assertVolunteerEventInvolvement(int $eventId, int $volunteerId): void
+    {
+        $statement = $this->db->prepare(
+            "SELECT 1
+             FROM events e
+             JOIN proposals p ON p.id = e.proposal_id
+             WHERE e.id = ? AND p.status IN ('approved', 'active')
+               AND (
+                   EXISTS (
+                       SELECT 1 FROM event_applications ea
+                       WHERE ea.event_id = e.id AND ea.volunteer_user_id = ? AND ea.status = 'approved'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM event_applications ea
+                       JOIN attendance a ON a.application_id = ea.id
+                       WHERE ea.event_id = e.id AND ea.volunteer_user_id = ? AND a.status = 'present'
+                   )
+               )"
+        );
+        $statement->execute([$eventId, $volunteerId, $volunteerId]);
+        if (!$statement->fetchColumn()) {
+            throw new RuntimeException('This event is only available to volunteers officially assigned to it or recorded as attendees.', 403);
+        }
+    }
+
+    private function activeEvaluationForm(int $eventId): array
+    {
+        $statement = $this->db->prepare(
+            "SELECT id, event_id, title, description
+             FROM evaluation_forms
+             WHERE event_id = ? AND status = 'published' AND is_active = 1"
+        );
+        $statement->execute([$eventId]);
+        $form = $statement->fetch();
+        if (!$form) {
+            throw new RuntimeException('There is no active evaluation form for this event.', 404);
+        }
+        return $form;
+    }
+
+    private function evaluationFormQuestions(int $formId): array
+    {
+        $statement = $this->db->prepare(
+            'SELECT id, question_text, question_type, is_required, settings
+             FROM evaluation_questions WHERE form_id = ? ORDER BY sort_order, id'
+        );
+        $statement->execute([$formId]);
+        $questions = [];
+        foreach ($statement->fetchAll() as $question) {
+            $settings = json_decode((string) $question['settings'], true);
+            $questions[] = [
+                'id' => (int) $question['id'],
+                'text' => $question['question_text'],
+                'type' => $question['question_type'],
+                'required' => (bool) $question['is_required'],
+                'settings' => is_array($settings) ? $settings : [],
+            ];
+        }
+        return $questions;
     }
 
     private function volunteerDocumentations(): never
@@ -1830,18 +2737,19 @@ final class ApiController
         } else {
             $ownerId = (int) $user['id'];
         }
+        $signaturePath = $this->storeProposalSignature($data['eSignature'] ?? null);
         $this->db->beginTransaction();
         try {
             $statement = $this->db->prepare(
                 'INSERT INTO proposals
-                    (owner_user_id, proposer_name, title, summary, venue, proponents, activity_components, estimated_cost_items,
+                    (owner_user_id, proposer_name, e_signature_path, title, summary, venue, proponents, activity_components, estimated_cost_items,
                      total_estimated_cost, justification, target_beneficiaries, target_outputs, possible_risks,
                      expected_private_partnerships, accepts_volunteers, volunteer_approval_mode,
                      period_start, period_end, stated_duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             $statement->execute([
-                $ownerId, $brief['proposer_name'], $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
+                $ownerId, $brief['proposer_name'], $signaturePath, $brief['title'], $brief['summary'], $brief['venue'], $brief['proponents'],
                 $brief['activity_components'], $brief['estimated_cost_items'], $brief['total_estimated_cost'],
                 $brief['justification'], $brief['target_beneficiaries'], $brief['target_outputs'],
                 $brief['possible_risks'], null,
@@ -1855,7 +2763,10 @@ final class ApiController
             $this->syncProposalCategories($proposalId, $data['categoryIds'] ?? []);
             $this->db->commit();
         } catch (Throwable $exception) {
-            $this->db->rollBack();
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            $this->removeStoredUpload($signaturePath);
             throw $exception;
         }
         $this->logActivity(
@@ -1980,6 +2891,68 @@ final class ApiController
         return 'data:image/jpeg;base64,' . base64_encode($logo);
     }
 
+    private function storeProposalSignature(mixed $signature): string
+    {
+        if (!is_string($signature) || !preg_match('#^data:image/png;base64,([A-Za-z0-9+/]+={0,2})$#', $signature, $matches)) {
+            throw new RuntimeException('Draw and save the proponent signature as a PNG image.');
+        }
+        if (strlen($matches[1]) > 1400000) {
+            throw new RuntimeException('The signature image must be smaller than 1 MB.');
+        }
+        $image = base64_decode($matches[1], true);
+        if ($image === false || strlen($image) < 100 || strlen($image) > 1024 * 1024) {
+            throw new RuntimeException('The signature image must be valid and smaller than 1 MB.');
+        }
+        $imageInfo = getimagesizefromstring($image);
+        if ($imageInfo === false || $imageInfo['mime'] !== 'image/png' ||
+            $imageInfo[0] > 1200 || $imageInfo[1] > 400) {
+            throw new RuntimeException('The signature must be a valid PNG image with supported dimensions.');
+        }
+        $directory = $this->config['uploads_path'] . DIRECTORY_SEPARATOR . 'signatures';
+        if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) {
+            throw new RuntimeException('Signature storage could not be prepared.', 500);
+        }
+        $filename = bin2hex(random_bytes(20)) . '.png';
+        $target = $directory . DIRECTORY_SEPARATOR . $filename;
+        if (file_put_contents($target, $image, LOCK_EX) !== strlen($image)) {
+            if (is_file($target)) {
+                unlink($target);
+            }
+            throw new RuntimeException('The signature could not be stored.', 500);
+        }
+        return 'uploads/signatures/' . $filename;
+    }
+
+    private function downloadProposalSignature(int $proposalId): never
+    {
+        $user = Http::user();
+        if (!in_array($user['role'], ['admin', 'partner'], true)) {
+            throw new RuntimeException('Proposal signatures are available to CES Admins and proposal partners.', 403);
+        }
+        $this->assertProposalAccess($proposalId, $user, false);
+        $statement = $this->db->prepare('SELECT e_signature_path FROM proposals WHERE id = ?');
+        $statement->execute([$proposalId]);
+        $relativePath = $statement->fetchColumn();
+        if (!is_string($relativePath) || $relativePath === '') {
+            throw new RuntimeException('No electronic signature is stored for this proposal.', 404);
+        }
+        $root = realpath($this->config['uploads_path']);
+        $relativePath = preg_replace('#^uploads/#', '', $relativePath);
+        $file = $root === false
+            ? false
+            : realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if ($root === false || $file === false ||
+            !str_starts_with(strtolower($file), strtolower($root . DIRECTORY_SEPARATOR)) || !is_file($file)) {
+            throw new RuntimeException('Stored proposal signature could not be found.', 404);
+        }
+        header('Content-Type: image/png');
+        header('Content-Length: ' . (string) filesize($file));
+        header('Content-Disposition: inline; filename="proposal-signature-' . $proposalId . '.png"');
+        header('X-Content-Type-Options: nosniff');
+        readfile($file);
+        exit;
+    }
+
     private function downloadProjectBrief(int $proposalId): never
     {
         $user = Http::user();
@@ -2017,6 +2990,24 @@ final class ApiController
         $budgetItems = $this->decodeJsonList($project['estimated_cost_items'] ?? null);
         $dateRange = trim((string) ($project['period_start'] ?? '') . ' to ' . (string) ($project['period_end'] ?? ''), ' to');
         $logoDataUri = $this->logoDataUri();
+        $signatureDataUri = null;
+        if (is_string($project['e_signature_path'] ?? null) && $project['e_signature_path'] !== '') {
+            $uploadRoot = realpath($this->config['uploads_path']);
+            $relativeSignaturePath = preg_replace('#^uploads/#', '', $project['e_signature_path']);
+            $signatureFile = $uploadRoot === false
+                ? false
+                : realpath($uploadRoot . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativeSignaturePath));
+            if ($uploadRoot === false || $signatureFile === false ||
+                !str_starts_with(strtolower($signatureFile), strtolower($uploadRoot . DIRECTORY_SEPARATOR)) ||
+                !is_file($signatureFile) || (new \finfo(FILEINFO_MIME_TYPE))->file($signatureFile) !== 'image/png') {
+                throw new RuntimeException('The stored proposal signature could not be loaded.', 500);
+            }
+            $signatureContents = file_get_contents($signatureFile);
+            if ($signatureContents === false) {
+                throw new RuntimeException('The stored proposal signature could not be loaded.', 500);
+            }
+            $signatureDataUri = 'data:image/png;base64,' . base64_encode($signatureContents);
+        }
         $html = '<!doctype html><html><head><meta charset="utf-8"><style>
             @page { margin: 28px 34px; }
             body { font-family: DejaVu Sans, sans-serif; color: #24372c; font-size: 10px; line-height: 1.45; }
@@ -2046,6 +3037,10 @@ final class ApiController
         $html .= '<tr><th>Co-Proponents / Partner Organizations</th><td>' . nl2br($escape(implode("\n", $partnerNames))) . '</td></tr>';
         $html .= '<tr><th>Program Term / Duration</th><td>' . $escape($dateRange ?: 'Not specified') . ' · ' . $escape($project['stated_duration'] ?? '') . '</td></tr>';
         $html .= '</tbody></table><h2>2. Activity Components &amp; Justification</h2>';
+        if ($signatureDataUri !== null) {
+            $html .= '<h2>Proponent Electronic Signature</h2><p><strong>' . $escape($project['proposer_name'] ?? '') .
+                '</strong><br><img src="' . $signatureDataUri . '" alt="Proponent electronic signature" style="width:280px;height:auto"></p>';
+        }
         $html .= $listTable($activities, ['Activity / Step' => 'activity']);
         $html .= '<p><strong>Justification / Objectives</strong><br>' . nl2br($escape($project['justification'] ?? '')) . '</p>';
         $html .= '<h2>3. Estimated Budget &amp; Cost Breakdown</h2>';
@@ -5582,7 +6577,7 @@ final class ApiController
         if ($root !== false && $file !== false &&
             str_starts_with(strtolower($file), strtolower($root . DIRECTORY_SEPARATOR)) && is_file($file)) {
             if (!unlink($file)) {
-                error_log('Unable to remove an uploaded verification file after registration rollback.');
+                error_log('Unable to remove a stored upload after database rollback.');
             }
         }
     }
