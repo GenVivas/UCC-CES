@@ -179,6 +179,9 @@ final class ApiController
         if (preg_match('#^/partner/documentations/([0-9]+)/file$#', $path, $matches) && $method === 'GET') {
             $this->downloadPartnerEventDocumentation(Http::positiveId($matches[1]));
         }
+        if (preg_match('#^/event-documentations/([0-9]+)/file$#', $path, $matches) && $method === 'GET') {
+            $this->downloadEventDocumentation(Http::positiveId($matches[1]));
+        }
         if (preg_match('#^/volunteer/documentations/([0-9]+)$#', $path, $matches) && $method === 'DELETE') {
             $this->deleteVolunteerDocumentation(Http::positiveId($matches[1]));
         }
@@ -2461,6 +2464,40 @@ final class ApiController
         exit;
     }
 
+    private function downloadEventDocumentation(int $documentationId): never
+    {
+        $user = Http::requireRole('admin', 'partner');
+        $statement = $this->db->prepare(
+            'SELECT d.event_id, d.relative_path, d.original_name, d.mime_type
+             FROM event_documentations d WHERE d.id = ?'
+        );
+        $statement->execute([$documentationId]);
+        $document = $statement->fetch();
+        if (!$document) {
+            throw new RuntimeException('Event documentation was not found.', 404);
+        }
+        $this->assertEventOrganizer((int) $document['event_id'], $user);
+        $root = realpath($this->config['uploads_path']);
+        $relativePath = preg_replace('#^uploads/#', '', $document['relative_path']);
+        $file = $root === false
+            ? false
+            : realpath($root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath));
+        if ($root === false || $file === false ||
+            !str_starts_with(strtolower($file), strtolower($root . DIRECTORY_SEPARATOR)) || !is_file($file)) {
+            throw new RuntimeException('Stored event documentation could not be found.', 404);
+        }
+        $downloadName = preg_replace('/[\x00-\x1F\x7F"\\\\]/', '_', basename($document['original_name']));
+        $inline = ($_GET['inline'] ?? '') === '1' &&
+            in_array($document['mime_type'], ['application/pdf', 'image/jpeg', 'image/png'], true);
+        header('Content-Type: ' . $document['mime_type']);
+        header('Content-Length: ' . (string) filesize($file));
+        header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') .
+            '; filename="' . ($downloadName ?: 'event-documentation') . '"');
+        header('X-Content-Type-Options: nosniff');
+        readfile($file);
+        exit;
+    }
+
     private function createVolunteerDocumentation(): never
     {
         $user = Http::requireRole('volunteer');
@@ -3222,7 +3259,9 @@ final class ApiController
         header('Content-Type: ' . $document['mime_type']);
         header('Content-Length: ' . (string) filesize($file));
         $downloadName = preg_replace('/[\x00-\x1F\x7F"\\\\]/', '_', basename($document['original_name']));
-        header('Content-Disposition: attachment; filename="' . ($downloadName ?: 'document') . '"');
+        $inline = ($_GET['inline'] ?? '') === '1' &&
+            in_array($document['mime_type'], ['application/pdf', 'image/jpeg', 'image/png'], true);
+        header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') . '; filename="' . ($downloadName ?: 'document') . '"');
         header('X-Content-Type-Options: nosniff');
         readfile($file);
         exit;
@@ -3308,6 +3347,7 @@ final class ApiController
                 'from' => $current['status'],
                 'to' => $status,
                 'event_id' => $eventId,
+                'notes' => $notes,
             ]);
             $this->db->commit();
         } catch (Throwable $exception) {
@@ -3995,55 +4035,9 @@ final class ApiController
         if (!in_array($user['role'], ['admin', 'partner'], true)) {
             throw new RuntimeException('Event details are available to administrators and event partners only.', 403);
         }
-        $statement = $this->db->prepare(
-            "SELECT e.id, e.proposal_id, e.title, e.description, e.venue, e.capacity,
-                    e.applications_open_at, e.applications_close_at,
-                    p.title AS project_title, p.status AS proposal_status,
-                    p.period_start, p.period_end,
-                    (SELECT GROUP_CONCAT(DISTINCT partner.organization_name ORDER BY partner.organization_name SEPARATOR ', ')
-                     FROM partners partner
-                     WHERE partner.user_id = p.owner_user_id
-                        OR partner.user_id IN (
-                            SELECT ep.partner_user_id FROM event_partners ep WHERE ep.event_id = e.id
-                        )) AS partner_name,
-                    (SELECT COUNT(*) FROM event_applications ea
-                     WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
-                    (SELECT COUNT(*) FROM attendance a
-                     JOIN event_dates ed ON ed.id = a.event_date_id
-                     WHERE ed.event_id = e.id AND a.status = 'present')
-                    +
-                    (SELECT COALESCE(SUM(pc.participant_count), 0)
-                     FROM participant_counts pc
-                     JOIN event_dates ed ON ed.id = pc.event_date_id
-                     WHERE ed.event_id = e.id) AS attendance_headcount
-             FROM events e
-             JOIN proposals p ON p.id = e.proposal_id
-             WHERE e.id = ? AND p.status IN ('approved', 'active')
-               AND (SELECT MAX(ed.event_date) FROM event_dates ed WHERE ed.event_id = e.id) >= CURDATE()"
-        );
-        $statement->execute([$eventId]);
-        $event = $statement->fetch();
-        if (!$event) {
-            throw new RuntimeException('Approved or active event was not found.', 404);
-        }
         $this->assertEventOrganizer($eventId, $user);
-
-        $dates = $this->db->prepare(
-            "SELECT ed.id, ed.event_date,
-                    MIN(a.start_time) AS start_time,
-                    MAX(a.end_time) AS end_time,
-                    COALESCE(GROUP_CONCAT(DISTINCT a.venue ORDER BY a.venue SEPARATOR ', '),
-                             (SELECT venue FROM events WHERE id = ed.event_id)) AS venues,
-                    (SELECT COUNT(*) FROM attendance at
-                     WHERE at.event_date_id = ed.id AND at.status = 'present') AS present_count
-             FROM event_dates ed
-             LEFT JOIN activities a ON a.event_date_id = ed.id
-             WHERE ed.event_id = ?
-             GROUP BY ed.id, ed.event_date
-             ORDER BY ed.event_date"
-        );
-        $dates->execute([$eventId]);
-        $event['dates'] = $dates->fetchAll();
+        $event = $this->eventDetailsData($eventId);
+        $event['proposal'] = $this->proposalDetails((int) $event['proposal_id'], (int) $user['id'], false);
         Http::json(['event' => $event]);
     }
 
@@ -5934,13 +5928,70 @@ final class ApiController
             throw new RuntimeException('Project reports are available to CES Admins and partner accounts.', 403);
         }
         $this->assertProposalAccess($proposalId, $user, false);
-        $project = $this->proposal($proposalId);
-        $owner = $this->db->prepare(
-            'SELECT u.id, u.first_name, u.last_name, p.organization_name, p.organization_type
+        Http::json($this->proposalDetails($proposalId, (int) $user['id']));
+    }
+
+    private function proposalDetails(int $proposalId, int $viewerId, bool $includeEvents = true): array
+    {
+        $record = $this->proposal($proposalId);
+        $ownerQuery = $this->db->prepare(
+            'SELECT u.id, u.email, u.role, u.account_status, u.first_name, u.last_name,
+                    u.contact_number, u.created_at, u.updated_at, p.organization_name,
+                    p.organization_type, p.organization_category, p.official_designation, p.address
              FROM users u LEFT JOIN partners p ON p.user_id = u.id
              WHERE u.id = ?'
         );
-        $owner->execute([(int) $project['owner_user_id']]);
+        $ownerQuery->execute([(int) $record['owner_user_id']]);
+        $owner = $ownerQuery->fetch() ?: null;
+
+        $reviewerQuery = $this->db->prepare(
+            'SELECT id, email, first_name, last_name, role
+             FROM users WHERE id = ?'
+        );
+        $reviewer = null;
+        if (!empty($record['reviewed_by'])) {
+            $reviewerQuery->execute([(int) $record['reviewed_by']]);
+            $reviewer = $reviewerQuery->fetch() ?: null;
+        }
+
+        $project = [
+            'id' => (int) $record['id'],
+            'ownerUserId' => (int) $record['owner_user_id'],
+            'proposerName' => $record['proposer_name'],
+            'title' => $record['title'],
+            'summary' => $record['summary'],
+            'status' => $record['status'],
+            'venue' => $record['venue'] ?? '',
+            'acceptsVolunteers' => (bool) ($record['accepts_volunteers'] ?? true),
+            'volunteerApprovalMode' => $record['volunteer_approval_mode'] ?? 'manual',
+            'periodStart' => $record['period_start'],
+            'periodEnd' => $record['period_end'],
+            'duration' => $record['stated_duration'],
+            'proponents' => $this->decodeJsonList($record['proponents'] ?? null),
+            'activityComponents' => $this->decodeJsonList($record['activity_components'] ?? null),
+            'estimatedCostItems' => $this->decodeJsonList($record['estimated_cost_items'] ?? null),
+            'totalEstimatedCost' => (float) ($record['total_estimated_cost'] ?? 0),
+            'justification' => $record['justification'] ?? '',
+            'targetBeneficiaries' => $record['target_beneficiaries'] ?? '',
+            'targetOutputs' => $record['target_outputs'] ?? '',
+            'possibleRisks' => $record['possible_risks'] ?? '',
+            'expectedPrivatePartnerships' => $record['expected_private_partnerships'] ?? '',
+            'reviewNotes' => $record['review_notes'],
+            'submittedAt' => $record['submitted_at'],
+            'reviewedAt' => $record['reviewed_at'],
+            'createdAt' => $record['created_at'],
+            'updatedAt' => $record['updated_at'],
+            'reviewedBy' => $reviewer,
+            'signature' => [
+                'available' => is_string($record['e_signature_path'] ?? null) && $record['e_signature_path'] !== '',
+                'url' => is_string($record['e_signature_path'] ?? null) && $record['e_signature_path'] !== ''
+                    ? '/proposals/' . $proposalId . '/signature'
+                    : null,
+                'signatoryName' => $record['proposer_name'],
+                'signatoryUser' => $owner,
+            ],
+        ];
+
         $classifications = $this->db->prepare(
             'SELECT classification FROM proposal_classifications WHERE proposal_id = ? ORDER BY classification'
         );
@@ -5951,44 +6002,376 @@ final class ApiController
              WHERE pc.proposal_id = ? ORDER BY c.name'
         );
         $categories->execute([$proposalId]);
-        $userRelationship = $this->db->prepare(
-            'SELECT relationship, invitation_status
-             FROM proposal_partners
-             WHERE proposal_id = ? AND partner_user_id = ?'
+        $partners = $this->db->prepare(
+            'SELECT pp.relationship, pp.invitation_status, pp.created_at,
+                    u.id AS user_id, u.email, u.first_name, u.last_name, u.contact_number,
+                    u.account_status, p.organization_name, p.organization_type,
+                    p.organization_category, p.official_designation, p.address
+             FROM proposal_partners pp
+             JOIN users u ON u.id = pp.partner_user_id
+             LEFT JOIN partners p ON p.user_id = pp.partner_user_id
+             WHERE pp.proposal_id = ?
+             ORDER BY FIELD(pp.relationship, \'primary\', \'collaborator\'), p.organization_name, u.last_name'
         );
-        $userRelationship->execute([$proposalId, (int) $user['id']]);
-        $relationship = $userRelationship->fetch() ?: [];
+        $partners->execute([$proposalId]);
+        $documents = $this->db->prepare(
+            'SELECT d.id, d.document_type, d.relative_path, d.original_name, d.mime_type,
+                    d.file_size, d.description, d.is_signed, d.created_at, d.uploaded_by,
+                    u.first_name AS uploader_first_name, u.last_name AS uploader_last_name,
+                    u.email AS uploader_email
+             FROM documents d JOIN users u ON u.id = d.uploaded_by
+             WHERE d.proposal_id = ?
+             ORDER BY d.created_at, d.id'
+        );
+        $documents->execute([$proposalId]);
+        $documentRows = $documents->fetchAll();
+        foreach ($documentRows as &$document) {
+            $document['id'] = (int) $document['id'];
+            $document['file_size'] = (int) $document['file_size'];
+            $document['is_signed'] = (bool) $document['is_signed'];
+            $document['file_url'] = '/documents/' . $document['id'];
+            $document['preview_url'] = in_array($document['mime_type'], ['image/jpeg', 'image/png', 'application/pdf'], true)
+                ? $document['file_url'] . '?inline=1'
+                : null;
+            unset($document['relative_path']);
+        }
+        unset($document);
 
-        Http::json([
-            'project' => [
-                'id' => (int) $project['id'],
-                'ownerUserId' => (int) $project['owner_user_id'],
-                'proposerName' => $project['proposer_name'],
-                'title' => $project['title'],
-                'summary' => $project['summary'],
-                'status' => $project['status'],
-                'venue' => $project['venue'] ?? '',
-                'acceptsVolunteers' => (bool) ($project['accepts_volunteers'] ?? true),
-                'volunteerApprovalMode' => $project['volunteer_approval_mode'] ?? 'manual',
-                'periodStart' => $project['period_start'],
-                'periodEnd' => $project['period_end'],
-                'duration' => $project['stated_duration'],
-                'proponents' => $this->decodeJsonList($project['proponents'] ?? null),
-                'activityComponents' => $this->decodeJsonList($project['activity_components'] ?? null),
-                'estimatedCostItems' => $this->decodeJsonList($project['estimated_cost_items'] ?? null),
-                'totalEstimatedCost' => (float) ($project['total_estimated_cost'] ?? 0),
-                'justification' => $project['justification'] ?? '',
-                'targetBeneficiaries' => $project['target_beneficiaries'] ?? '',
-                'targetOutputs' => $project['target_outputs'] ?? '',
-                'possibleRisks' => $project['possible_risks'] ?? '',
-                'expectedPrivatePartnerships' => $project['expected_private_partnerships'] ?? '',
-            ],
-            'owner' => $owner->fetch() ?: null,
+        $budget = $this->db->prepare(
+            'SELECT bi.id, bi.activity_id, bi.description, bi.quantity, bi.unit_cost,
+                    (bi.quantity * bi.unit_cost) AS subtotal, a.title AS activity_title
+             FROM budget_items bi LEFT JOIN activities a ON a.id = bi.activity_id
+             WHERE bi.proposal_id = ? ORDER BY bi.id'
+        );
+        $budget->execute([$proposalId]);
+        $evaluations = $this->db->prepare(
+            'SELECT ev.id, ev.rating, ev.feedback, ev.created_at, ev.submitted_by,
+                    u.first_name, u.last_name, u.email
+             FROM evaluations ev JOIN users u ON u.id = ev.submitted_by
+             WHERE ev.proposal_id = ? ORDER BY ev.created_at, ev.id'
+        );
+        $evaluations->execute([$proposalId]);
+        $relationshipQuery = $this->db->prepare(
+            'SELECT relationship, invitation_status
+             FROM proposal_partners WHERE proposal_id = ? AND partner_user_id = ?'
+        );
+        $relationshipQuery->execute([$proposalId, $viewerId]);
+        $relationship = $relationshipQuery->fetch() ?: [];
+        $events = [];
+        if ($includeEvents) {
+            $eventIds = $this->db->prepare('SELECT id FROM events WHERE proposal_id = ? ORDER BY created_at, id');
+            $eventIds->execute([$proposalId]);
+            foreach ($eventIds->fetchAll(PDO::FETCH_COLUMN) as $eventId) {
+                $events[] = $this->eventDetailsData((int) $eventId);
+            }
+        }
+
+        return [
+            'project' => $project,
+            'owner' => $owner,
             'userRelationship' => $relationship['relationship'] ?? null,
             'userInvitationStatus' => $relationship['invitation_status'] ?? null,
             'classifications' => array_column($classifications->fetchAll(), 'classification'),
             'categories' => array_column($categories->fetchAll(), 'name'),
-        ]);
+            'partners' => $partners->fetchAll(),
+            'documents' => $documentRows,
+            'budgetItems' => $budget->fetchAll(),
+            'evaluations' => $evaluations->fetchAll(),
+            'history' => $this->activityHistory('proposal', $proposalId),
+            'events' => $events,
+        ];
+    }
+
+    private function eventDetailsData(int $eventId): array
+    {
+        $eventQuery = $this->db->prepare(
+            "SELECT e.*, p.title AS project_title, p.status AS proposal_status,
+                    p.period_start, p.period_end,
+                    (SELECT partner.organization_name
+                     FROM partners partner WHERE partner.user_id = p.owner_user_id) AS project_owner_organization,
+                    (SELECT COUNT(*) FROM event_applications ea
+                     WHERE ea.event_id = e.id AND ea.status IN ('pending', 'approved')) AS registered_volunteers,
+                    (SELECT COALESCE(SUM(a.status = 'present'), 0)
+                     FROM attendance a JOIN event_dates ed ON ed.id = a.event_date_id
+                     WHERE ed.event_id = e.id) +
+                    (SELECT COALESCE(SUM(pc.participant_count), 0)
+                     FROM participant_counts pc JOIN event_dates ed ON ed.id = pc.event_date_id
+                     WHERE ed.event_id = e.id) AS attendance_headcount,
+                    CASE
+                        WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date = CURDATE()) THEN 'ongoing'
+                        WHEN EXISTS (SELECT 1 FROM event_dates ed WHERE ed.event_id = e.id AND ed.event_date > CURDATE()) THEN 'upcoming'
+                        ELSE 'completed'
+                    END AS event_status
+             FROM events e JOIN proposals p ON p.id = e.proposal_id
+             WHERE e.id = ?"
+        );
+        $eventQuery->execute([$eventId]);
+        $event = $eventQuery->fetch();
+        if (!$event) {
+            throw new RuntimeException('Event was not found.', 404);
+        }
+        foreach (['id', 'proposal_id', 'organizer_user_id', 'capacity', 'registered_volunteers', 'attendance_headcount'] as $field) {
+            if (isset($event[$field])) {
+                $event[$field] = (int) $event[$field];
+            }
+        }
+
+        $datesQuery = $this->db->prepare(
+            'SELECT id, event_date FROM event_dates WHERE event_id = ? ORDER BY event_date, id'
+        );
+        $datesQuery->execute([$eventId]);
+        $dates = $datesQuery->fetchAll();
+        $activities = $this->db->prepare(
+            'SELECT id, title, start_time, end_time, venue, target_participants, activity_lead
+             FROM activities WHERE event_date_id = ? ORDER BY start_time, id'
+        );
+        $presentCount = $this->db->prepare(
+            "SELECT COUNT(*) FROM attendance WHERE event_date_id = ? AND status = 'present'"
+        );
+        $participantCounts = $this->db->prepare(
+            'SELECT pc.id, pc.participant_group, pc.participant_count, pc.created_at,
+                    pc.recorded_by, u.first_name AS recorder_first_name, u.last_name AS recorder_last_name
+             FROM participant_counts pc JOIN users u ON u.id = pc.recorded_by
+             WHERE pc.event_date_id = ? ORDER BY pc.created_at, pc.id'
+        );
+        $attendance = $this->db->prepare(
+            'SELECT a.id, a.event_date_id, ed.event_date, a.status, a.scanned_at,
+                    a.checked_out_at, a.verification_status, a.marked_by, a.note,
+                    a.created_at, a.updated_at, marker.first_name AS marker_first_name,
+                    marker.last_name AS marker_last_name
+             FROM attendance a
+             JOIN event_dates ed ON ed.id = a.event_date_id
+             LEFT JOIN users marker ON marker.id = a.marked_by
+             WHERE a.application_id = ? ORDER BY ed.event_date, a.id'
+        );
+        $scanRequests = $this->db->prepare(
+            'SELECT asr.action, asr.created_at
+             FROM attendance_scan_requests asr
+             WHERE asr.attendance_id = ? ORDER BY asr.created_at, asr.action'
+        );
+        foreach ($dates as &$date) {
+            $date['id'] = (int) $date['id'];
+            $activities->execute([$date['id']]);
+            $date['activities'] = $activities->fetchAll();
+            $participantCounts->execute([$date['id']]);
+            $date['participant_counts'] = $participantCounts->fetchAll();
+            $date['start_time'] = $date['activities']
+                ? min(array_column($date['activities'], 'start_time'))
+                : null;
+            $date['end_time'] = $date['activities']
+                ? max(array_column($date['activities'], 'end_time'))
+                : null;
+            $date['venues'] = implode(', ', array_unique(array_column($date['activities'], 'venue')))
+                ?: (string) ($event['venue'] ?? '');
+            $presentCount->execute([$date['id']]);
+            $date['present_count'] = (int) $presentCount->fetchColumn();
+            foreach ($date['activities'] as &$activity) {
+                $activity['id'] = (int) $activity['id'];
+                $activity['target_participants'] = $activity['target_participants'] === null
+                    ? null
+                    : (int) $activity['target_participants'];
+            }
+            unset($activity);
+        }
+        unset($date);
+
+        $partners = $this->db->prepare(
+            'SELECT ep.relationship, ep.created_at, u.id AS user_id, u.email, u.first_name,
+                    u.last_name, u.contact_number, p.organization_name, p.organization_type,
+                    p.organization_category, p.official_designation, p.address
+             FROM event_partners ep JOIN users u ON u.id = ep.partner_user_id
+             LEFT JOIN partners p ON p.user_id = ep.partner_user_id
+             WHERE ep.event_id = ? ORDER BY FIELD(ep.relationship, \'organizer\', \'collaborator\'), p.organization_name'
+        );
+        $partners->execute([$eventId]);
+        $partnerRows = $partners->fetchAll();
+        $event['partner_name'] = implode(', ', array_values(array_unique(array_filter([
+            $event['project_owner_organization'] ?? null,
+            ...array_column($partnerRows, 'organization_name'),
+        ]))));
+        unset($event['project_owner_organization']);
+        $applications = $this->db->prepare(
+            'SELECT ea.id, ea.volunteer_user_id, ea.status, ea.applied_at, ea.reviewed_by,
+                    ea.reviewed_at, reviewer.first_name AS reviewer_first_name,
+                    reviewer.last_name AS reviewer_last_name, u.email, u.first_name, u.last_name,
+                    u.contact_number, u.account_status, vp.volunteer_type, vp.student_number,
+                    vp.faculty_id, vp.tanod_id, vp.affiliation_name, vp.campus,
+                    vp.course_program, vp.year_section, vp.barangay, vp.registration_classification
+             FROM event_applications ea
+             JOIN users u ON u.id = ea.volunteer_user_id
+             LEFT JOIN volunteer_profiles vp ON vp.user_id = ea.volunteer_user_id
+             LEFT JOIN users reviewer ON reviewer.id = ea.reviewed_by
+             WHERE ea.event_id = ? ORDER BY ea.applied_at, ea.id'
+        );
+        $applications->execute([$eventId]);
+        $applicationRows = $applications->fetchAll();
+        foreach ($applicationRows as &$application) {
+            $application['id'] = (int) $application['id'];
+            $application['volunteer_user_id'] = (int) $application['volunteer_user_id'];
+            $attendance->execute([$application['id']]);
+            $applicationAttendance = $attendance->fetchAll();
+            foreach ($applicationAttendance as &$attendanceRecord) {
+                $attendanceRecord['id'] = (int) $attendanceRecord['id'];
+                $attendanceRecord['event_date_id'] = (int) $attendanceRecord['event_date_id'];
+                $scanRequests->execute([$attendanceRecord['id']]);
+                $attendanceRecord['scan_requests'] = $scanRequests->fetchAll();
+            }
+            unset($attendanceRecord);
+            $application['attendance'] = $applicationAttendance;
+        }
+        unset($application);
+
+        $documentation = $this->db->prepare(
+            'SELECT d.id, d.documentation_type, d.original_name, d.mime_type, d.file_size,
+                    d.description, d.created_at, d.uploaded_by,
+                    u.first_name AS uploader_first_name, u.last_name AS uploader_last_name,
+                    u.email AS uploader_email
+             FROM event_documentations d JOIN users u ON u.id = d.uploaded_by
+             WHERE d.event_id = ? ORDER BY d.created_at, d.id'
+        );
+        $documentation->execute([$eventId]);
+        $documentationRows = $documentation->fetchAll();
+        foreach ($documentationRows as &$document) {
+            $document['id'] = (int) $document['id'];
+            $document['file_size'] = (int) $document['file_size'];
+            $document['file_url'] = '/event-documentations/' . $document['id'] . '/file';
+            $document['preview_url'] = in_array($document['mime_type'], ['image/jpeg', 'image/png', 'application/pdf'], true)
+                ? $document['file_url'] . '?inline=1'
+                : null;
+        }
+        unset($document);
+
+        $formsQuery = $this->db->prepare(
+            'SELECT ef.id, ef.created_by, ef.title, ef.description, ef.status, ef.is_active,
+                    ef.created_at, ef.updated_at, u.first_name AS creator_first_name,
+                    u.last_name AS creator_last_name, u.email AS creator_email
+             FROM evaluation_forms ef JOIN users u ON u.id = ef.created_by
+             WHERE ef.event_id = ? ORDER BY ef.created_at, ef.id'
+        );
+        $formsQuery->execute([$eventId]);
+        $forms = $formsQuery->fetchAll();
+        $questionsQuery = $this->db->prepare(
+            'SELECT id, question_text, question_type, is_required, settings, sort_order
+             FROM evaluation_questions WHERE form_id = ? ORDER BY sort_order, id'
+        );
+        $responsesQuery = $this->db->prepare(
+            'SELECT er.id, er.volunteer_user_id, er.answers, er.questions_snapshot, er.submitted_at,
+                    u.first_name, u.last_name, u.email
+             FROM evaluation_responses er JOIN users u ON u.id = er.volunteer_user_id
+             WHERE er.form_id = ? ORDER BY er.submitted_at, er.id'
+        );
+        foreach ($forms as &$form) {
+            $form['id'] = (int) $form['id'];
+            $form['is_active'] = (bool) $form['is_active'];
+            $questionsQuery->execute([$form['id']]);
+            $form['questions'] = $questionsQuery->fetchAll();
+            foreach ($form['questions'] as &$question) {
+                $question['id'] = (int) $question['id'];
+                $question['is_required'] = (bool) $question['is_required'];
+                $question['settings'] = json_decode((string) $question['settings'], true) ?: [];
+            }
+            unset($question);
+            $responsesQuery->execute([$form['id']]);
+            $form['responses'] = $responsesQuery->fetchAll();
+            foreach ($form['responses'] as &$response) {
+                $response['id'] = (int) $response['id'];
+                $response['volunteer_user_id'] = (int) $response['volunteer_user_id'];
+                $response['answers'] = json_decode((string) $response['answers'], true) ?: [];
+                $response['questions_snapshot'] = json_decode((string) $response['questions_snapshot'], true) ?: [];
+            }
+            unset($response);
+        }
+        unset($form);
+
+        $volunteerEvaluations = $this->db->prepare(
+            'SELECT ve.id, ve.volunteer_user_id, ve.rating, ve.feedback, ve.created_at,
+                    u.first_name, u.last_name, u.email
+             FROM volunteer_event_evaluations ve JOIN users u ON u.id = ve.volunteer_user_id
+             WHERE ve.event_id = ? ORDER BY ve.created_at, ve.id'
+        );
+        $volunteerEvaluations->execute([$eventId]);
+        $certificates = $this->db->prepare(
+            'SELECT c.id, c.volunteer_user_id, c.issued_at, u.first_name, u.last_name, u.email
+             FROM certificates c JOIN users u ON u.id = c.volunteer_user_id
+             WHERE c.event_id = ? ORDER BY c.issued_at, c.id'
+        );
+        $certificates->execute([$eventId]);
+        $certificateRows = $certificates->fetchAll();
+        foreach ($certificateRows as &$certificate) {
+            $certificate['id'] = (int) $certificate['id'];
+            $certificate['file_url'] = '/certificates/' . $certificate['id'];
+        }
+        unset($certificate);
+
+        $event['dates'] = $dates;
+        $event['partners'] = $partnerRows;
+        $event['applications'] = $applicationRows;
+        $event['documents'] = $documentationRows;
+        $event['evaluation_forms'] = $forms;
+        $event['volunteer_evaluations'] = $volunteerEvaluations->fetchAll();
+        $event['certificates'] = $certificateRows;
+        $event['history'] = $this->activityHistory('event', $eventId, true);
+        return $event;
+    }
+
+    private function activityHistory(string $entityType, int $entityId, bool $includeRelatedEvents = false): array
+    {
+        if ($includeRelatedEvents) {
+            $statement = $this->db->prepare(
+                "SELECT al.id, al.actor_role, al.action, al.entity_type, al.entity_id,
+                        al.details, al.created_at, u.first_name AS actor_first_name,
+                        u.last_name AS actor_last_name, u.email AS actor_email
+                 FROM activity_logs al LEFT JOIN users u ON u.id = al.actor_user_id
+                 WHERE (al.entity_type = 'event' AND al.entity_id = ?)
+                    OR JSON_UNQUOTE(JSON_EXTRACT(al.details, '$.event_id')) = ?
+                    OR JSON_UNQUOTE(JSON_EXTRACT(al.details, '$.event_date_id')) IN (
+                        SELECT CAST(ed.id AS CHAR) FROM event_dates ed WHERE ed.event_id = ?
+                    )
+                    OR (al.entity_type = 'event_date' AND al.entity_id IN (
+                        SELECT ed.id FROM event_dates ed WHERE ed.event_id = ?
+                    ))
+                    OR (al.entity_type = 'event_application' AND al.entity_id IN (
+                        SELECT ea.id FROM event_applications ea WHERE ea.event_id = ?
+                    ))
+                    OR (al.entity_type = 'event_documentation' AND al.entity_id IN (
+                        SELECT d.id FROM event_documentations d WHERE d.event_id = ?
+                    ))
+                    OR (al.entity_type = 'attendance' AND al.entity_id IN (
+                        SELECT a.id FROM attendance a
+                        JOIN event_applications ea ON ea.id = a.application_id
+                        WHERE ea.event_id = ?
+                    ))
+                 ORDER BY al.created_at DESC, al.id DESC"
+            );
+            $statement->execute([
+                $entityId,
+                (string) $entityId,
+                $entityId,
+                $entityId,
+                $entityId,
+                $entityId,
+                $entityId,
+            ]);
+        } else {
+            $statement = $this->db->prepare(
+                'SELECT al.id, al.actor_role, al.action, al.entity_type, al.entity_id,
+                        al.details, al.created_at, u.first_name AS actor_first_name,
+                        u.last_name AS actor_last_name, u.email AS actor_email
+                 FROM activity_logs al LEFT JOIN users u ON u.id = al.actor_user_id
+                 WHERE al.entity_type = ? AND al.entity_id = ?
+                 ORDER BY al.created_at DESC, al.id DESC'
+            );
+            $statement->execute([$entityType, $entityId]);
+        }
+        $history = $statement->fetchAll();
+        foreach ($history as &$entry) {
+            $entry['id'] = (int) $entry['id'];
+            $entry['details'] = $entry['details'] === null
+                ? []
+                : (json_decode((string) $entry['details'], true) ?: []);
+        }
+        unset($entry);
+        return $history;
     }
 
     private function notifications(): never

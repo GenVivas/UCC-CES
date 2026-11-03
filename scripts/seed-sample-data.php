@@ -11,7 +11,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 if (($argv[1] ?? '') !== '--apply') {
-    fwrite(STDERR, "This replaces transactional sample data and adds three inert sample accounts. Other accounts and profiles are preserved.\n");
+    fwrite(STDERR, "This replaces transactional sample data without creating, changing, or deleting any user accounts or linked profiles.\n");
     fwrite(STDERR, "Run: php scripts/seed-sample-data.php --apply\n");
     exit(2);
 }
@@ -23,18 +23,8 @@ $today = new DateTimeImmutable('today', new DateTimeZone($config['timezone']));
 $now = new DateTimeImmutable('now', new DateTimeZone($config['timezone']));
 mt_srand(20261024);
 
-$sampleAccounts = [
-    ['email' => 'sample.pending.partner@ucc-ces.example.invalid', 'role' => 'partner', 'status' => 'pending', 'first_name' => 'Sample Pending', 'last_name' => 'Partner', 'contact' => '0000000001', 'rejection_reason' => null],
-    ['email' => 'sample.rejected.volunteer@ucc-ces.example.invalid', 'role' => 'volunteer', 'status' => 'rejected', 'first_name' => 'Sample Rejected', 'last_name' => 'Volunteer', 'contact' => '0000000002', 'rejection_reason' => 'SAMPLE ONLY: verification details require correction.'],
-    ['email' => 'sample.disabled.partner@ucc-ces.example.invalid', 'role' => 'partner', 'status' => 'disabled', 'first_name' => 'Sample Disabled', 'last_name' => 'Partner', 'contact' => '0000000003', 'rejection_reason' => null],
-];
-$sampleAccountEmails = array_column($sampleAccounts, 'email');
 $fingerprint = static fn (array $rows): string => hash('sha256', serialize($rows));
-$allUsersBefore = $db->query('SELECT * FROM users ORDER BY id')->fetchAll();
-$usersBefore = array_values(array_filter(
-    $allUsersBefore,
-    static fn (array $user): bool => !in_array($user['email'], $sampleAccountEmails, true)
-));
+$usersBefore = $db->query('SELECT * FROM users ORDER BY id')->fetchAll();
 $protectedUserIds = array_map('intval', array_column($usersBefore, 'id'));
 $protectedIds = implode(',', $protectedUserIds);
 $partnersBefore = $db->query('SELECT * FROM partners WHERE user_id IN (' . $protectedIds . ') ORDER BY user_id')->fetchAll();
@@ -78,11 +68,23 @@ if ($adminIds === [] || $partnerIds === [] || count($volunteerIds) < 2) {
 
 $projectRoot = dirname(__DIR__);
 $sampleDirectory = $projectRoot . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'sample-seed';
+$signaturePath = $sampleDirectory . DIRECTORY_SEPARATOR . 'proponent-signature.png';
+if (!is_file($signaturePath)) {
+    $signatureImage = base64_decode(
+        'iVBORw0KGgoAAAANSUhEUgAAASwAAABkCAIAAACzY5qXAAADlElEQVR42u3dbW6jMBCAYY6xl+gh9kZ7lT1x9sdKUZQAATxjD/C8iqq2Soxr5p0x5qPTA8BQJkMAkBAgIQASAiQEQEKAhABICJAQAAkBEgIgIUBCACQESAiAhAAJAZAQICEAEgIkBEBCgIQASAiQEAAJARICICFAQgAkBEiYyq/ff+wekHCkgf9f9pCURMKRBvJQSiJhCQlvHnyGgoTjDbxz5FUeChmBhNcPstmhKBL6lfPj6bLDOSTsP6wVgqyshJWL8xlnT1Op/LQUdp2HtUgdrjAUJzpeOO+BzFSqsFSIvFJ1+Ln1IrGVtGtCWqg8ex8v4cZBqRB5FXbk7KYb+xPyJySlyMZG1nt1Cg+nOut7GcFXZAa4q4Wl7R7uT7gqgamhcZyXWkj1MLzNqU5hCQ++IjPAXe2svPlYf0ISSnivQiaQ6x+M8rBDjZ2GFJY+u3n7NCzP/5A0dLg/IdGz/sHA1LC9qcND2rgqkeThVKSwZOfazml+4x7du63weAqp5O29avRqr7Etyp2jEi51tCWhtofO4cjOmG4dnvomJfWMRbVjO+Vr30LySNSr6DHh9qyTVwRi60/IdKuOFbHT45aR3FvoYifVFdxLkXBvGsuQcHj92ZtxGg9aonxon4oHVrAkGYoolyhhy+pLlITbM2hG8WnsalTj7dmqQ/0feP694BnFqefJwMZzTS25tnHok4wNjPXw5dPAE3fhpwEvdvX51PlKy8ak25hr81YI26UaeNYutjKktvZ4uJUpYaoW6/DePgT+pQMv7gk5oZp9dtu9iykS9s+7gbOdxjAdm7CTru/JO+56IEPCUdcrDTyqHnthXbfVhUsed11Qwoxj9/p3Gw2/xPws9917/kXvStj/nr069xkV7ImYvt0x4agbZ4vcblvq3l8GetBT76Xnag+e8KwX3E5CzzKx/kHC+wZQqQzCQBLeNICUIPjXaJbgQUIAJARICICEAAkBkBAgIQASAiQEQEKAhABICJAQAAkBEgIgIUBCACQESNidvz8/r6+3Xz5/fH3/26c+37PS8uwbVrby+ZHZ70HCc0v4NdCfqrx+s0uY9e2+NU5CkHBesM+v4RKubOXr5kDCK0xHl6aRs193TUe3S7hUb7frDRKeviquV7ntde9YJdxS7khIQhKSECRMno4ek/BzEtu+OjrbAglJCICEAAkBkBAgIQASAiQEQEKAhABICJAQAAkBEgLowT/cLv/lttbrpAAAAABJRU5ErkJggg==',
+        true
+    );
+    if ($signatureImage === false ||
+        file_put_contents($signaturePath, $signatureImage, LOCK_EX) !== strlen($signatureImage)) {
+        throw new RuntimeException('The local sample signature image could not be prepared.');
+    }
+}
 $sampleFiles = [
     'project-brief.pdf' => ['application/pdf', 'Project Brief'],
     'signed-moa.pdf' => ['application/pdf', 'Sample Signed Document'],
     'volunteer-report.pdf' => ['application/pdf', 'Volunteer Report'],
     'volunteer-certificate.pdf' => ['application/pdf', 'Certificate'],
+    'proponent-signature.png' => ['image/png', 'Sample Proponent Signature'],
 ];
 $sampleFileSizes = [];
 foreach ($sampleFiles as $filename => [$expectedMime]) {
@@ -202,6 +204,7 @@ $json = static fn (array $value): string => json_encode($value, JSON_THROW_ON_ER
 $date = static fn (DateTimeImmutable $value): string => $value->format('Y-m-d H:i:s');
 
 $deleteTables = [
+    'evaluation_responses', 'evaluation_questions', 'evaluation_forms',
     'attendance_scan_requests', 'attendance', 'budget_items', 'certificates', 'documents', 'evaluations',
     'event_documentations', 'event_applications', 'participant_counts', 'activities', 'event_dates', 'event_partners', 'events',
     'proposal_categories', 'proposal_classifications', 'proposal_partners', 'proposals',
@@ -212,55 +215,6 @@ $db->beginTransaction();
 try {
     foreach ($deleteTables as $table) {
         $db->exec('DELETE FROM `' . $table . '`');
-    }
-
-    $sampleAccountInsert = $db->prepare(
-        'INSERT INTO users (email,password_hash,role,account_status,rejection_reason,first_name,last_name,contact_number)
-         VALUES (?,?,?,?,?,?,?,?)'
-    );
-    $samplePartnerIds = [];
-    foreach ($sampleAccounts as $sampleAccount) {
-        $existing = $db->prepare('SELECT id,role FROM users WHERE email = ?');
-        $existing->execute([$sampleAccount['email']]);
-        $existingAccount = $existing->fetch();
-        if ($existingAccount && $existingAccount['role'] !== $sampleAccount['role']) {
-            throw new RuntimeException('A reserved sample account email is already used by another role.');
-        }
-        if ($existingAccount) {
-            $userId = (int) $existingAccount['id'];
-            $update = $db->prepare('UPDATE users SET account_status = ?, rejection_reason = ? WHERE id = ?');
-            $update->execute([$sampleAccount['status'], $sampleAccount['rejection_reason'], $userId]);
-        } else {
-            $sampleAccountInsert->execute([
-                $sampleAccount['email'],
-                password_hash(bin2hex(random_bytes(32)), PASSWORD_DEFAULT),
-                $sampleAccount['role'],
-                $sampleAccount['status'],
-                $sampleAccount['rejection_reason'],
-                $sampleAccount['first_name'],
-                $sampleAccount['last_name'],
-                $sampleAccount['contact'],
-            ]);
-            $userId = (int) $db->lastInsertId();
-        }
-        if ($sampleAccount['role'] === 'partner') {
-            $samplePartnerIds[] = $userId;
-            $profile = $db->prepare(
-                "INSERT INTO partners
-                    (user_id,organization_name,organization_type,organization_category,official_designation,verification_path,address)
-                 VALUES (?,?,'Other','Other','Sample Test Contact','uploads/sample-seed/project-brief.pdf','Fictional sample address')
-                 ON DUPLICATE KEY UPDATE organization_name = VALUES(organization_name)"
-            );
-            $profile->execute([$userId, 'SAMPLE ONLY - ' . $sampleAccount['first_name'] . ' Partner Organization']);
-        } else {
-            $profile = $db->prepare(
-                "INSERT INTO volunteer_profiles
-                    (user_id,volunteer_type,affiliation_name,affiliation_proof_path,registration_classification)
-                 VALUES (?,'civilian','SAMPLE ONLY - Community Resident','uploads/sample-seed/volunteer-report.pdf','External Guest / Community Resident')
-                 ON DUPLICATE KEY UPDATE affiliation_name = VALUES(affiliation_name)"
-            );
-            $profile->execute([$userId]);
-        }
     }
 
     $categoryIds = [];
@@ -288,26 +242,22 @@ try {
         }
     }
 
-    $partnerSubcategory = $db->prepare('INSERT IGNORE INTO partner_subcategories (partner_user_id,subcategory_id) VALUES (?,?)');
-    foreach (['Digital Literacy', 'Learning Support', 'Community Health Education', 'Urban Greening', 'Microenterprise Skills', 'Household Preparedness', 'Gender and Development'] as $subcategory) {
-        foreach ($samplePartnerIds as $samplePartnerId) {
-            $partnerSubcategory->execute([$samplePartnerId, $subcategoryIds[$subcategory]]);
-        }
-    }
-
     $proposalInsert = $db->prepare(
         'INSERT INTO proposals
-        (owner_user_id,proposer_name,title,summary,venue,proponents,activity_components,estimated_cost_items,total_estimated_cost,
+        (owner_user_id,proposer_name,e_signature_path,title,summary,venue,proponents,activity_components,estimated_cost_items,total_estimated_cost,
          justification,target_beneficiaries,target_outputs,possible_risks,expected_private_partnerships,
          accepts_volunteers,volunteer_approval_mode,status,period_start,period_end,stated_duration,
          review_notes,submitted_at,reviewed_by,reviewed_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
     );
     $proposerNameQuery = $db->prepare('SELECT CONCAT(first_name, \' \', last_name) FROM users WHERE id = ?');
     $proposalPartner = $db->prepare('INSERT INTO proposal_partners (proposal_id,partner_user_id,relationship,invitation_status,created_at) VALUES (?,? ,?,?,?)');
     $proposalClassification = $db->prepare('INSERT INTO proposal_classifications (proposal_id,classification) VALUES (?,?)');
     $proposalCategory = $db->prepare('INSERT INTO proposal_categories (proposal_id,category_id) VALUES (?,?)');
     $document = $db->prepare('INSERT INTO documents (proposal_id,uploaded_by,document_type,relative_path,original_name,mime_type,file_size,description,is_signed,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    $evaluationFormInsert = $db->prepare('INSERT INTO evaluation_forms (event_id,created_by,title,description,status,is_active,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)');
+    $evaluationQuestionInsert = $db->prepare('INSERT INTO evaluation_questions (form_id,question_text,question_type,is_required,settings,sort_order) VALUES (?,?,?,?,?,?)');
+    $evaluationResponseInsert = $db->prepare('INSERT INTO evaluation_responses (form_id,event_id,volunteer_user_id,answers,questions_snapshot,submitted_at) VALUES (?,?,?,?,?,?)');
     $eventInsert = $db->prepare('INSERT INTO events (proposal_id,organizer_user_id,title,description,venue,capacity,applications_open_at,applications_close_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)');
     $eventPartner = $db->prepare("INSERT INTO event_partners (event_id,partner_user_id,relationship,created_at) VALUES (?,?,'organizer',?)");
     $eventCollaborator = $db->prepare("INSERT INTO event_partners (event_id,partner_user_id,relationship,created_at) VALUES (?,?,'collaborator',?)");
@@ -328,6 +278,14 @@ try {
     $log = static function (PDOStatement $statement, array $roleMap, int $actorId, string $action, string $entity, int $entityId, array $details, string $createdAt) use ($json): void {
         $statement->execute([$actorId, $roleMap[$actorId], $action, $entity, $entityId, $json($details), $createdAt]);
     };
+    $evaluationQuestionTemplates = [
+        ['text' => 'How useful was the event?', 'type' => 'rating', 'required' => true, 'settings' => ['min' => 1, 'max' => 5]],
+        ['text' => 'How would you rate the facilitation?', 'type' => 'multiple_choice', 'required' => true, 'settings' => ['options' => ['Excellent', 'Good', 'Fair']]],
+        ['text' => 'Which parts were most useful?', 'type' => 'checkboxes', 'required' => false, 'settings' => ['options' => ['Demonstration', 'Group activity', 'Learning materials']]],
+        ['text' => 'How did you hear about the event?', 'type' => 'dropdown', 'required' => true, 'settings' => ['options' => ['Barangay notice', 'School', 'Community partner']]],
+        ['text' => 'What was most helpful?', 'type' => 'short_answer', 'required' => true, 'settings' => []],
+        ['text' => 'What should be improved in a future session?', 'type' => 'paragraph', 'required' => false, 'settings' => []],
+    ];
 
     $eventPlans = [];
     $activeIndex = 0;
@@ -410,13 +368,14 @@ try {
         $ownerId = $partnerIds[$i % count($partnerIds)];
         $proposerNameQuery->execute([$ownerId]);
         $proposerName = (string) $proposerNameQuery->fetchColumn();
+        $signatureRelativePath = 'uploads/sample-seed/proponent-signature.png';
         $collaboratorId = count($partnerIds) > 1 ? $partnerIds[($i + 1) % count($partnerIds)] : null;
         $venue = ($i % 2 === 0)
             ? 'Barangay ' . $barangay . ' multi-purpose hall'
             : 'UCC ' . (($i % 4 === 0) ? 'North' : 'South') . ' Campus outreach venue';
 
         $proposalInsert->execute([
-            $ownerId, $proposerName, $title, $summaries[$i % count($summaries)], $venue,
+            $ownerId, $proposerName, $signatureRelativePath, $title, $summaries[$i % count($summaries)], $venue,
             $json($proponents[$i % count($proponents)]), $json($projectComponents), $json($costItems),
             round($totalCents / 100, 2), $justifications[$i % count($justifications)],
             sprintf('Residents of Barangay %s, including youth, caregivers and senior citizens; anticipated reach %d-%d residents.', $barangay, 35 + ($i % 5) * 10, 85 + ($i % 4) * 15),
@@ -460,18 +419,16 @@ try {
             0,
             $date($briefCreatedAt),
         ]);
-        if ($hasBeenSubmitted) {
-            $signedDocumentCreatedAt = $created->modify('+3 days');
-            if ($signedDocumentCreatedAt > $now) {
-                $signedDocumentCreatedAt = $now;
-            }
-            $document->execute([
-                $proposalId, $ownerId, 'signed_proposal_letter', 'uploads/sample-seed/signed-moa.pdf',
-                'SAMPLE - ' . $project[0] . ' Proposal Letter.pdf', 'application/pdf', $sampleFileSizes['signed-moa.pdf'],
-                'SAMPLE ONLY: generic fictional PDF used to exercise the signed-proposal-letter slot; not an authentic endorsement.',
-                1, $date($signedDocumentCreatedAt),
-            ]);
+        $signedDocumentCreatedAt = $created->modify('+3 days');
+        if ($signedDocumentCreatedAt > $now) {
+            $signedDocumentCreatedAt = $now;
         }
+        $document->execute([
+            $proposalId, $ownerId, 'signed_proposal_letter', 'uploads/sample-seed/signed-moa.pdf',
+            'SAMPLE - ' . $project[0] . ' Proposal Letter.pdf', 'application/pdf', $sampleFileSizes['signed-moa.pdf'],
+            'SAMPLE ONLY: generic fictional PDF used to exercise the signed-proposal-letter slot; not an authentic endorsement.',
+            1, $date($signedDocumentCreatedAt),
+        ]);
         if ($i % 3 === 0 && $hasBeenSubmitted) {
             $document->execute([
                 $proposalId, $ownerId, 'moa', 'uploads/sample-seed/signed-moa.pdf',
@@ -547,6 +504,26 @@ try {
         if ($collaboratorStatus === 'accepted' && $collaboratorId !== null) {
             $eventCollaborator->execute([$eventId, $collaboratorId, $date($eventCreated)]);
         }
+        $evaluationFormInsert->execute([
+            $eventId, $ownerId, 'SAMPLE ONLY - ' . $eventTitle . ' Evaluation',
+            'Fictional feedback form for local testing; responses are synthetic.',
+            'published', 1, $date($eventCreated), $date($eventCreated),
+        ]);
+        $evaluationFormId = (int) $db->lastInsertId();
+        $evaluationQuestions = [];
+        foreach ($evaluationQuestionTemplates as $sortOrder => $question) {
+            $evaluationQuestionInsert->execute([
+                $evaluationFormId, $question['text'], $question['type'], (int) $question['required'],
+                $json($question['settings']), $sortOrder,
+            ]);
+            $evaluationQuestions[] = [
+                'id' => (int) $db->lastInsertId(),
+                'text' => $question['text'],
+                'type' => $question['type'],
+                'required' => $question['required'],
+                'settings' => $question['settings'],
+            ];
+        }
         $dateRows = [];
         $firstActivityId = null;
         foreach ($scheduledDates as $dayIndex => $eventDate) {
@@ -573,6 +550,7 @@ try {
         }
         $eventPlans[] = [
             'proposal'=>$proposalId,'event'=>$eventId,'title'=>$eventTitle,'last'=>$lastDate,'owner'=>$ownerId,
+            'form'=>$evaluationFormId,'questions'=>$evaluationQuestions,
             'dates'=>$dateRows,'applications'=>[],
         ];
         $log($activityLog, $rolesByUserId, $ownerId, 'event.created', 'event', $eventId, ['proposal_id'=>$proposalId,'sample_data'=>true], $date($eventCreated));
@@ -676,6 +654,9 @@ try {
             }
             $rating = 3 + (($eventIndex + $volunteerIndex) % 3);
             $evaluationAt = $event['last']->modify('+2 days')->setTime(10 + $volunteerIndex, 15);
+            if ($evaluationAt > $now) {
+                $evaluationAt = $now;
+            }
             $volunteerEvaluationInsert->execute([
                 $event['event'], $volunteerId, $rating,
                 $feedback[($eventIndex + $volunteerIndex) % count($feedback)], $date($evaluationAt),
@@ -684,6 +665,31 @@ try {
             $evaluationInsert->execute([
                 $event['proposal'], $volunteerId, $rating,
                 $feedback[($eventIndex + $volunteerIndex + 1) % count($feedback)], $date($evaluationAt),
+            ]);
+            $answers = [];
+            foreach ($event['questions'] as $question) {
+                $answers[(string) $question['id']] = match ($question['type']) {
+                    'rating' => $rating,
+                    'multiple_choice' => ['Excellent', 'Good', 'Fair'][($eventIndex + $volunteerIndex) % 3],
+                    'checkboxes' => ['Demonstration', 'Learning materials'],
+                    'dropdown' => ['Barangay notice', 'School', 'Community partner'][($eventIndex + $volunteerIndex) % 3],
+                    'short_answer' => 'The hands-on demonstration was useful.',
+                    'paragraph' => 'The fictional session was welcoming. Add another small-group activity in a future session.',
+                };
+            }
+            $questionsSnapshot = array_map(
+                static fn (array $question): array => [
+                    'id' => $question['id'],
+                    'text' => $question['text'],
+                    'type' => $question['type'],
+                    'required' => $question['required'],
+                    'settings' => $question['settings'],
+                ],
+                $event['questions'],
+            );
+            $evaluationResponseInsert->execute([
+                $event['form'], $event['event'], $volunteerId,
+                $json($answers), $json($questionsSnapshot), $date($evaluationAt),
             ]);
             $log($activityLog, $rolesByUserId, $volunteerId, 'volunteer.evaluation_submitted', 'evaluation', $eventEvaluationId, ['event_id'=>$event['event'],'rating'=>$rating,'sample_data'=>true], $date($evaluationAt));
 
@@ -767,9 +773,39 @@ try {
          WHERE checked_out_at IS NOT NULL
            AND (scanned_at IS NULL OR checked_out_at < scanned_at OR status <> 'present')"
     )->fetchColumn();
+    $incompleteProposals = (int) $db->query(
+        "SELECT COUNT(*) FROM proposals p
+         WHERE p.e_signature_path IS NULL OR p.e_signature_path=''
+            OR NOT EXISTS (
+                SELECT 1 FROM documents d WHERE d.proposal_id=p.id AND d.document_type='project_brief'
+            )
+            OR NOT EXISTS (
+                SELECT 1 FROM documents d
+                WHERE d.proposal_id=p.id AND d.document_type='signed_proposal_letter' AND d.is_signed=1
+            )"
+    )->fetchColumn();
+    $eventsWithoutForms = (int) $db->query(
+        'SELECT COUNT(*) FROM events e
+         LEFT JOIN evaluation_forms ef ON ef.event_id=e.id
+         WHERE ef.id IS NULL OR ef.status<>\'published\' OR ef.is_active<>1'
+    )->fetchColumn();
+    $formsWithoutSixQuestionTypes = (int) $db->query(
+        'SELECT COUNT(*) FROM (
+            SELECT ef.id FROM evaluation_forms ef
+            LEFT JOIN evaluation_questions eq ON eq.form_id=ef.id
+            GROUP BY ef.id
+            HAVING COUNT(DISTINCT eq.question_type)<>6
+        ) incomplete_forms'
+    )->fetchColumn();
+    $evaluationResponseCount = (int) $db->query('SELECT COUNT(*) FROM evaluation_responses')->fetchColumn();
+    $futureEvaluationResponses = $db->prepare('SELECT COUNT(*) FROM evaluation_responses WHERE submitted_at > ?');
+    $futureEvaluationResponses->execute([$date($now)]);
+    $futureEvaluationResponses = (int) $futureEvaluationResponses->fetchColumn();
     if ($budgetMismatches !== 0 || $orphanApplications !== 0 || $orphanAttendance !== 0 ||
-        $orphanEventDocumentation !== 0 || $eventsForNonActiveProposals !== 0 || $invalidAttendanceTimes !== 0) {
-        throw new RuntimeException('Seed validation failed: budget totals, event workflow, documentation, or volunteer relationships do not match.');
+        $orphanEventDocumentation !== 0 || $eventsForNonActiveProposals !== 0 || $invalidAttendanceTimes !== 0 ||
+        $incompleteProposals !== 0 || $eventsWithoutForms !== 0 || $formsWithoutSixQuestionTypes !== 0 ||
+        $evaluationResponseCount === 0 || $futureEvaluationResponses !== 0) {
+        throw new RuntimeException('Seed validation failed: proposal evidence, evaluation forms, timeline, budget, attendance, or volunteer relationships do not match.');
     }
 
     $statusChecks = [
@@ -780,6 +816,8 @@ try {
         'attendance statuses' => ["SELECT COUNT(DISTINCT status) FROM attendance", 3],
         'attendance verification states' => ["SELECT COUNT(DISTINCT verification_status) FROM attendance", 2],
         'proposal document types' => ["SELECT COUNT(DISTINCT document_type) FROM documents", 6],
+        'evaluation question types' => ["SELECT COUNT(DISTINCT question_type) FROM evaluation_questions", 6],
+        'evaluation form states' => ["SELECT COUNT(DISTINCT status) FROM evaluation_forms", 1],
         'notification read states' => ["SELECT COUNT(DISTINCT IF(read_at IS NULL, 'unread', 'read')) FROM notifications", 2],
         'attendance scan actions' => ["SELECT COUNT(DISTINCT action) FROM attendance_scan_requests", 2],
     ];
@@ -794,7 +832,8 @@ try {
         throw new RuntimeException('The sample upload directory is not available.');
     }
     $storedPaths = $db->query(
-        'SELECT relative_path FROM documents
+        'SELECT e_signature_path AS relative_path FROM proposals
+         UNION ALL SELECT relative_path FROM documents
          UNION ALL SELECT relative_path FROM certificates
          UNION ALL SELECT relative_path FROM volunteer_documentations
          UNION ALL SELECT relative_path FROM event_documentations'
@@ -821,7 +860,7 @@ try {
 $protectedIds = implode(',', $protectedUserIds);
 $partnerIdsSql = implode(',', $protectedPartnerIds);
 $volunteerIdsSql = implode(',', $protectedVolunteerIds);
-$usersAfter = $db->query('SELECT * FROM users WHERE id IN (' . $protectedIds . ') ORDER BY id')->fetchAll();
+$usersAfter = $db->query('SELECT * FROM users ORDER BY id')->fetchAll();
 $partnersAfter = $db->query('SELECT * FROM partners WHERE user_id IN (' . $partnerIdsSql . ') ORDER BY user_id')->fetchAll();
 $volunteersAfter = $db->query('SELECT * FROM volunteer_profiles WHERE user_id IN (' . $volunteerIdsSql . ') ORDER BY user_id')->fetchAll();
 if ($fingerprint($usersAfter) !== $userFingerprint ||
@@ -833,7 +872,8 @@ if ($fingerprint($usersAfter) !== $userFingerprint ||
 $tables = [
     'users','partners','volunteer_profiles','sectors','subcategories','partner_subcategories','categories','proposals',
     'proposal_classifications','proposal_categories','proposal_partners','documents','events','event_partners','event_dates',
-    'activities','event_applications','attendance','attendance_scan_requests','budget_items','evaluations','participant_counts','certificates',
+    'evaluation_forms','evaluation_questions','evaluation_responses','activities','event_applications','attendance','attendance_scan_requests',
+    'budget_items','evaluations','participant_counts','certificates',
     'volunteer_event_evaluations','volunteer_documentations','event_documentations','password_reset_otps','notifications','activity_logs',
 ];
 $counts = [];
@@ -841,8 +881,19 @@ foreach ($tables as $table) {
     $statement = $db->query('SELECT COUNT(*) FROM `' . $table . '`');
     $counts[$table] = (int) $statement->fetchColumn();
 }
+$eventLifecycle = ['completed' => 0, 'ongoing' => 0, 'upcoming' => 0];
+foreach ($eventPlans as $event) {
+    $firstEventDate = $event['dates'][0]['date'];
+    if ($event['last'] < $today) {
+        $eventLifecycle['completed']++;
+    } elseif ($firstEventDate <= $today) {
+        $eventLifecycle['ongoing']++;
+    } else {
+        $eventLifecycle['upcoming']++;
+    }
+}
 
-fwrite(STDOUT, "Sample data refresh completed. Original accounts and linked profiles were preserved; three inert fictional accounts cover pending, rejected, and disabled account states.\n");
+fwrite(STDOUT, "Sample data refresh completed. Existing user accounts and linked profiles were preserved; no accounts were created or changed.\n");
 foreach ($counts as $table => $count) {
     fwrite(STDOUT, sprintf("%-30s %d\n", $table, $count));
 }
@@ -852,4 +903,11 @@ fwrite(STDOUT, "Invalid attendance time-outs: 0\n");
 fwrite(STDOUT, "Account statuses: pending, approved, rejected, disabled\n");
 fwrite(STDOUT, "Event application statuses: pending, approved, rejected, withdrawn\n");
 fwrite(STDOUT, "Collaboration invitation statuses: accepted, pending, declined\n");
-fwrite(STDOUT, "Sample-only accounts use reserved example.invalid addresses and random unknown passwords.\n");
+fwrite(STDOUT, "Proposal status coverage: draft, submitted, under review, revision, approved, active, rejected\n");
+fwrite(STDOUT, "Completed proposal work is represented by active proposals with completed event schedules; proposal status has no completed state.\n");
+fwrite(STDOUT, sprintf(
+    "Event lifecycle: %d completed, %d ongoing, %d upcoming\n",
+    $eventLifecycle['completed'],
+    $eventLifecycle['ongoing'],
+    $eventLifecycle['upcoming'],
+));

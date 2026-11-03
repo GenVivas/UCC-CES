@@ -761,6 +761,34 @@ body.auth-entry {
 .proposal-detail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px; border: 1px solid #e0eae2; border-radius: 12px; background: #fff; }
 .proposal-detail-actions .button { width: auto; }
 .proposal-detail-actions textarea { flex: 1 1 100%; min-width: min(100%, 260px); min-height: 64px; }
+.record-detail-section { min-width: 0; padding: 17px; border: 1px solid #e3ece5; border-radius: 12px; background: #fff; }
+.record-detail-section > h3 { margin: 0 0 12px; color: #244a35; font: 700 14px Manrope, "Segoe UI", sans-serif; }
+.record-detail-description { margin: 0 0 12px; color: #68786e; font-size: 11px; line-height: 1.55; }
+.record-detail-grid { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(0, 1.3fr); margin: 0; }
+.record-detail-grid dt, .record-detail-grid dd { min-width: 0; margin: 0; padding: 9px 10px; border-top: 1px solid #edf2ee; font-size: 11px; overflow-wrap: anywhere; }
+.record-detail-grid dt { color: #68786e; font-weight: 700; }
+.record-detail-grid dd { color: #30473a; white-space: pre-wrap; }
+.record-detail-table-wrap { max-width: 100%; overflow-x: auto; }
+.record-detail-table { width: 100%; min-width: 620px; border-collapse: collapse; }
+.record-detail-table th, .record-detail-table td { padding: 9px 10px; border: 1px solid #e6eee8; text-align: left; vertical-align: top; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.record-detail-table th { background: #f5f9f6; color: #53675b; font-weight: 700; }
+.record-nested-card { display: grid; gap: 12px; margin-top: 12px; padding: 14px; border: 1px solid #e5ede7; border-radius: 10px; background: #fbfdfb; }
+.record-nested-card > h4 { margin: 0; color: #244a35; font: 700 12px Manrope, "Segoe UI", sans-serif; }
+.record-file-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 12px; }
+.record-file-card { display: grid; align-content: start; justify-items: start; gap: 10px; min-width: 0; padding: 13px; border: 1px solid #e3ece5; border-radius: 10px; background: #fbfdfb; }
+.record-file-card h4 { margin: 0; color: #244a35; font: 700 12px Manrope, "Segoe UI", sans-serif; overflow-wrap: anywhere; }
+.record-file-meta { display: grid; grid-template-columns: minmax(82px, .7fr) minmax(0, 1.3fr); width: 100%; margin: 0; }
+.record-file-meta dt, .record-file-meta dd { margin: 0; padding: 4px 2px; color: #68786e; font-size: 10px; overflow-wrap: anywhere; }
+.record-file-meta dt { font-weight: 700; }
+.record-file-meta dd { color: #30473a; }
+.record-file-preview { display: block; width: 100%; max-height: 320px; object-fit: contain; border: 1px solid #e5ede7; border-radius: 8px; background: #fff; }
+.record-file-preview-error { margin: 0; color: #a3443a; font-size: 11px; }
+.record-signature-image { display: block; width: min(100%, 420px); max-height: 180px; object-fit: contain; object-position: left center; padding: 10px; border: 1px solid #e5ede7; border-radius: 8px; background: #fff; }
+.record-history-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.record-history-item { display: grid; gap: 6px; padding: 12px; border-left: 3px solid #168a4b; border-radius: 6px; background: #f7faf8; color: #68786e; font-size: 10px; overflow-wrap: anywhere; }
+.record-history-item > strong { color: #244a35; font-size: 12px; }
+.record-history-item .record-detail-grid { margin-top: 4px; }
+.record-detail-section .button { width: auto; text-decoration: none; }
 @keyframes project-dossier-enter { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .report-results { margin-top: 16px; }
 .report-table { min-width: 760px; }
@@ -1353,12 +1381,15 @@ body.password-change-entry .workspace { margin-left: 0; }
     .event-detail-metric strong { font-size: 20px; }
     .event-detail-grid { grid-template-columns: minmax(110px, .8fr) minmax(0, 1.2fr); }
     .event-detail-grid dt, .event-detail-grid dd { padding: 9px 6px; font-size: 10px; }
+    .record-detail-section { padding: 13px; }
+    .record-detail-grid { grid-template-columns: minmax(105px, .8fr) minmax(0, 1.2fr); }
+    .record-detail-grid dt, .record-detail-grid dd { padding: 8px 6px; font-size: 10px; }
 }
 @media print {
     .topbar, .sidebar, .event-detail-back, .event-detail-actions { display: none !important; }
     body.app-entry, body.app-entry .workspace, .event-detail-hero, .event-detail-panel, .event-detail-qr-panel { margin: 0; padding: 0; background: #fff; box-shadow: none; }
     body.app-entry .workspace { margin: 0; }
-    .event-detail-hero, .event-detail-panel, .event-detail-qr-panel, .event-detail-qr-card { break-inside: avoid; border-color: #cbd8ce; }
+    .event-detail-hero, .event-detail-panel, .event-detail-qr-panel, .event-detail-qr-card, .record-detail-section, .record-nested-card, .record-file-card, .record-history-item { break-inside: avoid; border-color: #cbd8ce; }
     .event-detail-qr-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .event-detail-qr-image { width: 150px; }
 }

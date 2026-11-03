@@ -188,6 +188,456 @@ function panel(title, description) {
     return section;
 }
 
+function detailSection(title, description) {
+    const section = node('section', undefined, 'record-detail-section');
+    section.append(node('h3', title));
+    if (description) section.append(node('p', description, 'record-detail-description'));
+    return section;
+}
+
+function detailValue(value) {
+    if (value === null || value === undefined || value === '') return 'Not recorded';
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (Array.isArray(value)) return value.length ? value.map(detailValue).join('\n') : 'None recorded';
+    if (typeof value === 'object') return JSON.stringify(value, null, 2);
+    return String(value);
+}
+
+function appendDetailFields(section, fields) {
+    const grid = node('dl', undefined, 'record-detail-grid');
+    fields.forEach(([label, value]) => {
+        grid.append(node('dt', label), node('dd', detailValue(value)));
+    });
+    section.append(grid);
+}
+
+function appendDetailTable(section, columns, rows, emptyMessage = 'No records are associated with this item.') {
+    if (!rows.length) {
+        section.append(node('p', emptyMessage, 'empty'));
+        return;
+    }
+    const wrap = node('div', undefined, 'record-detail-table-wrap');
+    const table = node('table', undefined, 'record-detail-table');
+    const head = node('thead');
+    const headingRow = node('tr');
+    columns.forEach(([label]) => headingRow.append(node('th', label)));
+    head.append(headingRow);
+    const body = node('tbody');
+    rows.forEach(record => {
+        const row = node('tr');
+        columns.forEach(([, key]) => row.append(node('td', detailValue(record[key]))));
+        body.append(row);
+    });
+    table.append(head, body);
+    wrap.append(table);
+    section.append(wrap);
+}
+
+function appendAttachmentSection(container, title, files) {
+    const section = detailSection(title);
+    if (!files.length) {
+        section.append(node('p', 'No files are attached to this record.', 'empty'));
+        container.append(section);
+        return;
+    }
+    const list = node('div', undefined, 'record-file-list');
+    files.forEach(file => {
+        const card = node('article', undefined, 'record-file-card');
+        const name = node('h4', file.original_name || 'Uploaded file');
+        const metadata = [
+            ['Type', file.document_type || file.documentation_type],
+            ['MIME type', file.mime_type],
+            ['Size', file.file_size === undefined ? null : `${Number(file.file_size).toLocaleString()} bytes`],
+            ['Uploaded', file.created_at],
+            ['Uploaded by', [file.uploader_first_name, file.uploader_last_name].filter(Boolean).join(' ') || file.uploader_email],
+            ['Description', file.description],
+            ['Signed', file.is_signed]
+        ].filter(([, value]) => value !== undefined);
+        const info = node('dl', undefined, 'record-file-meta');
+        metadata.forEach(([label, value]) => {
+            info.append(node('dt', label), node('dd', detailValue(value)));
+        });
+        card.append(name, info);
+        if (file.preview_url && /^image\/(jpeg|png)$/.test(file.mime_type || '')) {
+            const preview = node('img', undefined, 'record-file-preview');
+            preview.src = `${API}${file.preview_url}`;
+            preview.alt = `Preview of ${file.original_name || 'uploaded image'}`;
+            preview.loading = 'lazy';
+            preview.addEventListener('error', () => {
+                preview.replaceWith(node('p', `The saved image preview is unavailable: ${file.original_name || 'uploaded image'}.`, 'record-file-preview-error'));
+            }, { once: true });
+            card.append(preview);
+        } else if (file.preview_url && file.mime_type === 'application/pdf') {
+            const preview = node('a', 'Open PDF preview', 'button button-quiet button-small');
+            preview.href = `${API}${file.preview_url}`;
+            preview.target = '_blank';
+            preview.rel = 'noopener';
+            card.append(preview);
+        }
+        if (file.file_url) {
+            const download = node('a', 'Download original file', 'button button-quiet button-small');
+            download.href = `${API}${file.file_url}`;
+            download.download = file.original_name || '';
+            card.append(download);
+        }
+        list.append(card);
+    });
+    section.append(list);
+    container.append(section);
+}
+
+function appendRecordHistory(container, title, history) {
+    const section = detailSection(title);
+    if (!history.length) {
+        section.append(node('p', 'No recorded history is available for this record.', 'empty'));
+        container.append(section);
+        return;
+    }
+    const list = node('ol', undefined, 'record-history-list');
+    history.forEach(entry => {
+        const item = node('li', undefined, 'record-history-item');
+        const actor = [entry.actor_first_name, entry.actor_last_name].filter(Boolean).join(' ');
+        item.append(
+            node('strong', entry.action),
+            node('span', entry.created_at || 'Timestamp not recorded'),
+            node('span', `${actor || entry.actor_email || entry.actor_role || 'System'} · ${entry.actor_role || 'role not recorded'}`),
+            node('span', `Record: ${entry.entity_type || 'unknown'}${entry.entity_id ? ` #${entry.entity_id}` : ''}`)
+        );
+        if (entry.details && Object.keys(entry.details).length) {
+            appendDetailFields(item, Object.entries(entry.details).map(([key, value]) => [key, value]));
+        }
+        list.append(item);
+    });
+    section.append(list);
+    container.append(section);
+}
+
+function appendProposalRecordSections(container, data) {
+    const project = data.project;
+    const projectSection = detailSection('Complete proposal information');
+    appendDetailFields(projectSection, [
+        ['Proposal ID', project.id],
+        ['Title', project.title],
+        ['Brief description', project.summary],
+        ['Proposed by / signatory', project.proposerName],
+        ['Venue / location', project.venue],
+        ['Proponents / partner organizations', project.proponents],
+        ['Activity components', project.activityComponents],
+        ['Justification / objectives', project.justification],
+        ['Target beneficiaries and headcount', project.targetBeneficiaries],
+        ['Target outputs / success indicators', project.targetOutputs],
+        ['Possible risks and mitigation', project.possibleRisks],
+        ['Expected private partnerships', project.expectedPrivatePartnerships],
+        ['Accepts volunteers', project.acceptsVolunteers],
+        ['Volunteer approval mode', project.volunteerApprovalMode],
+        ['Project start', project.periodStart],
+        ['Project end', project.periodEnd],
+        ['Stated duration', project.duration],
+        ['Classifications', data.classifications],
+        ['Categories', data.categories],
+        ['Status', project.status],
+        ['Latest review remarks', project.reviewNotes],
+        ['Submitted at', project.submittedAt],
+        ['Reviewed at', project.reviewedAt],
+        ['Created at', project.createdAt],
+        ['Last updated at', project.updatedAt],
+        ['Reviewed by', project.reviewedBy
+            ? `${project.reviewedBy.first_name} ${project.reviewedBy.last_name} · ${project.reviewedBy.email} · ${project.reviewedBy.role}`
+            : null],
+        ['Current user relationship', data.userRelationship],
+        ['Current user invitation status', data.userInvitationStatus]
+    ]);
+    container.append(projectSection);
+
+    const owner = data.owner;
+    const ownerSection = detailSection('Proponent account and organization');
+    appendDetailFields(ownerSection, [
+        ['Account ID', owner?.id],
+        ['Account name', [owner?.first_name, owner?.last_name].filter(Boolean).join(' ')],
+        ['Email', owner?.email],
+        ['Contact number', owner?.contact_number],
+        ['Role', owner?.role],
+        ['Account status', owner?.account_status],
+        ['Organization', owner?.organization_name],
+        ['Organization type', owner?.organization_type],
+        ['Organization category', owner?.organization_category],
+        ['Official designation', owner?.official_designation],
+        ['Organization address', owner?.address],
+        ['Account created', owner?.created_at],
+        ['Account updated', owner?.updated_at]
+    ]);
+    container.append(ownerSection);
+
+    const signatureSection = detailSection('Proponent e-signature');
+    const signature = project.signature;
+    if (signature?.available && signature.url) {
+        signatureSection.append(
+            node('p', `Saved signature for ${signature.signatoryName || 'the proposal signatory'}.`, 'record-detail-description')
+        );
+        const image = node('img', undefined, 'record-signature-image');
+        image.src = `${API}${signature.url}`;
+        image.alt = `Saved e-signature of ${signature.signatoryName || 'proposal signatory'}`;
+        image.addEventListener('error', () => {
+            image.replaceWith(node('p', `The saved signature image could not be loaded for ${signature.signatoryName || 'the proposal signatory'}.`, 'record-file-preview-error'));
+        }, { once: true });
+        signatureSection.append(image);
+        appendDetailFields(signatureSection, [
+            ['Signatory name', signature.signatoryName],
+            ['Associated account', signature.signatoryUser
+                ? `${signature.signatoryUser.first_name} ${signature.signatoryUser.last_name} · ${signature.signatoryUser.email}`
+                : null]
+        ]);
+    } else {
+        signatureSection.append(node('p', 'No saved e-signature is associated with this proposal.', 'empty'));
+    }
+    container.append(signatureSection);
+
+    const partnersSection = detailSection('Partner organizations and collaboration records');
+    appendDetailTable(partnersSection, [
+        ['Relationship', 'relationship'],
+        ['Invitation status', 'invitation_status'],
+        ['Organization', 'organization_name'],
+        ['Organization type', 'organization_type'],
+        ['Category', 'organization_category'],
+        ['Official designation', 'official_designation'],
+        ['Address', 'address'],
+        ['Contact person', 'contact_name'],
+        ['Email', 'email'],
+        ['Phone', 'contact_number'],
+        ['Account status', 'account_status'],
+        ['Added', 'created_at']
+    ], (data.partners || []).map(partner => ({
+        ...partner,
+        contact_name: [partner.first_name, partner.last_name].filter(Boolean).join(' ')
+    })));
+    container.append(partnersSection);
+
+    const budget = detailSection('Additional budget records');
+    appendDetailTable(budget, [
+        ['Budget item ID', 'id'],
+        ['Activity ID', 'activity_id'],
+        ['Activity', 'activity_title'],
+        ['Description', 'description'],
+        ['Quantity', 'quantity'],
+        ['Unit cost', 'unit_cost'],
+        ['Subtotal', 'subtotal']
+    ], data.budgetItems || []);
+    container.append(budget);
+
+    const evaluations = detailSection('Proposal evaluations and feedback');
+    appendDetailTable(evaluations, [
+        ['Evaluation ID', 'id'],
+        ['Rating', 'rating'],
+        ['Feedback', 'feedback'],
+        ['Submitted by', 'evaluator'],
+        ['Email', 'email'],
+        ['Submitted at', 'created_at']
+    ], (data.evaluations || []).map(entry => ({
+        ...entry,
+        evaluator: [entry.first_name, entry.last_name].filter(Boolean).join(' ')
+    })));
+    container.append(evaluations);
+
+    appendAttachmentSection(container, 'Proposal documents and attachments', data.documents || []);
+    appendRecordHistory(container, 'Proposal approval and update history', data.history || []);
+}
+
+function appendEventRecordSections(container, event, includeProposal = false) {
+    const eventSection = detailSection('Complete event information');
+    appendDetailFields(eventSection, [
+        ['Event ID', event.id],
+        ['Event title', event.title],
+        ['Description', event.description],
+        ['Project proposal', event.project_title],
+        ['Proposal ID', event.proposal_id],
+        ['Proposal status', event.proposal_status],
+        ['Venue / location', event.venue],
+        ['Volunteer capacity', event.capacity],
+        ['Applications open at', event.applications_open_at],
+        ['Applications close at', event.applications_close_at],
+        ['Event status', event.event_status],
+        ['Registered volunteers', event.registered_volunteers],
+        ['Attendance headcount', event.attendance_headcount],
+        ['Created at', event.created_at],
+        ['Organizer account ID', event.organizer_user_id]
+    ]);
+    container.append(eventSection);
+
+    const schedule = detailSection('Schedule, activities, and participant counts');
+    if (!(event.dates || []).length) {
+        schedule.append(node('p', 'No scheduled dates are associated with this event.', 'empty'));
+    }
+    (event.dates || []).forEach(date => {
+        const dateCard = node('article', undefined, 'record-nested-card');
+        dateCard.append(node('h4', `${date.event_date} · Event date #${date.id}`));
+        appendDetailTable(dateCard, [
+            ['Activity ID', 'id'],
+            ['Activity', 'title'],
+            ['Start time', 'start_time'],
+            ['End time', 'end_time'],
+            ['Venue', 'venue'],
+            ['Target participants', 'target_participants'],
+            ['Activity lead', 'activity_lead']
+        ], date.activities || [], 'No activities are recorded for this date.');
+        appendDetailTable(dateCard, [
+            ['Count record ID', 'id'],
+            ['Participant group', 'participant_group'],
+            ['Participant count', 'participant_count'],
+            ['Recorded by', 'recorder'],
+            ['Recorded at', 'created_at']
+        ], (date.participant_counts || []).map(record => ({
+            ...record,
+            recorder: [record.recorder_first_name, record.recorder_last_name].filter(Boolean).join(' ')
+        })), 'No participant counts are recorded for this date.');
+        schedule.append(dateCard);
+    });
+    container.append(schedule);
+
+    const partnersSection = detailSection('Event organizers and partners');
+    appendDetailTable(partnersSection, [
+        ['Relationship', 'relationship'],
+        ['Organization', 'organization_name'],
+        ['Organization type', 'organization_type'],
+        ['Category', 'organization_category'],
+        ['Official designation', 'official_designation'],
+        ['Contact name', 'contact_name'],
+        ['Email', 'email'],
+        ['Phone', 'contact_number'],
+        ['Address', 'address'],
+        ['Linked at', 'created_at']
+    ], (event.partners || []).map(partner => ({
+        ...partner,
+        contact_name: [partner.first_name, partner.last_name].filter(Boolean).join(' ')
+    })));
+    container.append(partnersSection);
+
+    const applications = detailSection('Volunteer roster, applications, and attendance');
+    if (!(event.applications || []).length) {
+        applications.append(node('p', 'No volunteer applications are associated with this event.', 'empty'));
+    }
+    (event.applications || []).forEach(application => {
+        const card = node('article', undefined, 'record-nested-card');
+        card.append(node('h4', `${application.first_name} ${application.last_name} · Application #${application.id}`));
+        appendDetailFields(card, [
+            ['Application status', application.status],
+            ['Applied at', application.applied_at],
+            ['Reviewed by', [application.reviewer_first_name, application.reviewer_last_name].filter(Boolean).join(' ')],
+            ['Reviewed at', application.reviewed_at],
+            ['Volunteer account ID', application.volunteer_user_id],
+            ['Email', application.email],
+            ['Contact number', application.contact_number],
+            ['Account status', application.account_status],
+            ['Volunteer type', application.volunteer_type],
+            ['Student number', application.student_number],
+            ['Faculty ID', application.faculty_id],
+            ['Tanod ID', application.tanod_id],
+            ['Affiliation', application.affiliation_name],
+            ['Registration classification', application.registration_classification],
+            ['Campus', application.campus],
+            ['Course / program', application.course_program],
+            ['Year / section', application.year_section],
+            ['Barangay', application.barangay]
+        ]);
+        appendDetailTable(card, [
+            ['Attendance ID', 'id'],
+            ['Date', 'event_date'],
+            ['Status', 'status'],
+            ['Verification', 'verification_status'],
+            ['Scanned in', 'scanned_at'],
+            ['Checked out', 'checked_out_at'],
+            ['Marked by', 'marker'],
+            ['Note', 'note'],
+            ['Created', 'created_at'],
+            ['Updated', 'updated_at'],
+            ['Scan requests', 'scan_requests']
+        ], (application.attendance || []).map(record => ({
+            ...record,
+            marker: [record.marker_first_name, record.marker_last_name].filter(Boolean).join(' '),
+            scan_requests: (record.scan_requests || []).map(scan => `${scan.action} · ${scan.created_at}`)
+        })), 'No attendance records are associated with this application.');
+        applications.append(card);
+    });
+    container.append(applications);
+
+    appendAttachmentSection(container, 'Event files, photos, and attachments', event.documents || []);
+
+    const evaluations = detailSection('Evaluation forms and volunteer responses');
+    if (!(event.evaluation_forms || []).length) {
+        evaluations.append(node('p', 'No dynamic evaluation forms are associated with this event.', 'empty'));
+    }
+    (event.evaluation_forms || []).forEach(form => {
+        const formCard = node('article', undefined, 'record-nested-card');
+        formCard.append(node('h4', form.title));
+        appendDetailFields(formCard, [
+            ['Form ID', form.id],
+            ['Description', form.description],
+            ['Status', form.status],
+            ['Active', form.is_active],
+            ['Created by', `${form.creator_first_name} ${form.creator_last_name} · ${form.creator_email}`],
+            ['Created at', form.created_at],
+            ['Updated at', form.updated_at]
+        ]);
+        appendDetailTable(formCard, [
+            ['Question ID', 'id'],
+            ['Question', 'question_text'],
+            ['Type', 'question_type'],
+            ['Required', 'is_required'],
+            ['Settings / options', 'settings'],
+            ['Order', 'sort_order']
+        ], form.questions || [], 'No questions are recorded for this form.');
+        appendDetailTable(formCard, [
+            ['Response ID', 'id'],
+            ['Volunteer', 'respondent'],
+            ['Email', 'email'],
+            ['Answers', 'answers'],
+            ['Question snapshot', 'questions_snapshot'],
+            ['Submitted at', 'submitted_at']
+        ], (form.responses || []).map(response => ({
+            ...response,
+            respondent: `${response.first_name} ${response.last_name}`
+        })), 'No volunteer responses have been submitted.');
+        evaluations.append(formCard);
+    });
+    appendDetailTable(evaluations, [
+        ['Evaluation ID', 'id'],
+        ['Volunteer', 'volunteer'],
+        ['Email', 'email'],
+        ['Rating', 'rating'],
+        ['Feedback', 'feedback'],
+        ['Submitted at', 'created_at']
+    ], (event.volunteer_evaluations || []).map(response => ({
+        ...response,
+        volunteer: `${response.first_name} ${response.last_name}`
+    })), 'No legacy event evaluations have been submitted.');
+    container.append(evaluations);
+
+    const certificates = detailSection('Issued volunteer certificates');
+    const certificateRows = (event.certificates || []).map(certificate => ({
+        ...certificate,
+        volunteer: `${certificate.first_name} ${certificate.last_name}`,
+        file_url: undefined
+    }));
+    appendDetailTable(certificates, [
+        ['Certificate ID', 'id'],
+        ['Volunteer', 'volunteer'],
+        ['Email', 'email'],
+        ['Issued at', 'issued_at']
+    ], certificateRows);
+    (event.certificates || []).forEach(certificate => {
+        const link = node('a', `Open certificate #${certificate.id}`, 'button button-quiet button-small');
+        link.href = `${API}${certificate.file_url}`;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        certificates.append(link);
+    });
+    container.append(certificates);
+    appendRecordHistory(container, 'Event activity and approval history', event.history || []);
+
+    if (includeProposal && event.proposal) {
+        appendProposalRecordSections(container, event.proposal);
+    }
+}
+
 function renderPaginatedItems(container, items, renderItem, page, onPageChange, itemLabel = 'items') {
     const pageSize = 10;
     const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -1473,7 +1923,7 @@ function createProposalWizard(categories, partners, proposal = null) {
             <label>Project Name<input name="title" maxlength="190" required></label>
             <label class="wide">Brief Description<textarea name="summary" rows="3" maxlength="10000" required></textarea></label>
             <label class="wide">Project Venue / Location<input name="venue" maxlength="255" placeholder="Enter a venue or leave blank if it is still to be determined"></label>
-            <label class="wide">Proposer Full Name<input name="proposerName" maxlength="190" autocomplete="name" required></label>
+            <label class="wide">Proponent Full Name<input name="proposerName" maxlength="190" autocomplete="name" required></label>
             ${proposal ? '' : '<div class="wide proposal-signature-field"><strong>Proponent E-Signature</strong><p class="field-hint">Sign in the box using a mouse, touch screen, or stylus. This signature will be stored privately with this proposal.</p><canvas class="proposal-signature-pad" width="700" height="180" data-signature-canvas aria-label="Draw your electronic signature"></canvas><input type="hidden" name="eSignature"><div class="proposal-signature-actions"><button type="button" class="button button-quiet button-small" data-clear-signature>Clear signature</button><span data-signature-status role="status">Signature required</span></div></div>'}
             <div class="wide proposal-list-editor"><div class="proposal-list-heading"><strong>Co-Proponents / Partner Organizations</strong><button type="button" class="button button-quiet button-small" data-add-row="proponents">Add organization</button></div><p class="field-hint">Select UCC campuses or an approved/pending partner organization. Add multiple organizations as needed.</p><div data-proponents-list></div></div>
             <label>Program Start Date<input name="periodStart" type="date" required></label>
@@ -2802,7 +3252,7 @@ async function renderEvaluationManagement(selectedEventId = null, notice = '') {
         const table = node('table', undefined, 'proposal-table evaluation-event-table');
         const head = node('thead');
         const header = node('tr');
-        ['Event title', 'Date', 'Proposer / partner', 'Form status', 'Responses'].forEach(label => header.append(node('th', label)));
+        ['Event title', 'Date', 'Proponent / partner', 'Form status', 'Responses'].forEach(label => header.append(node('th', label)));
         head.append(header);
         const body = node('tbody');
         events.forEach(event => {
@@ -3267,7 +3717,7 @@ async function renderEventDetails(eventId) {
     const detailGrid = node('dl', undefined, 'event-detail-grid');
     [
         ['Project', event.project_title],
-        ['Host partner / department', event.partner_name || 'UCC / University program'],
+        ['Host partner / department', event.partner_name || 'Not recorded'],
         ['Date range', dateRange],
         ['Time range', dates.some(date => date.start_time)
             ? `${dates.find(date => date.start_time).start_time.slice(0, 5)} – ${[...dates].reverse().find(date => date.end_time)?.end_time?.slice(0, 5) || '—'}`
@@ -3292,6 +3742,8 @@ async function renderEventDetails(eventId) {
     );
     details.append(actions);
     pageContent.append(details);
+
+    appendEventRecordSections(pageContent, event, true);
 
     const qrPanel = panel('Attendee Attendance QR Codes', "A date-specific QR code is available on each scheduled event day. Approved volunteers can scan that day's code to check in or check out.");
     qrPanel.classList.add('event-detail-qr-panel');
@@ -4270,7 +4722,7 @@ async function renderEvaluationReports() {
         const completedEvents = panel('Completed event reports');
         addReportTable(
             completedEvents,
-            ['Event', 'Date completed', 'Proposer / partners', 'Responses', 'Average score', 'Report'],
+            ['Event', 'Date completed', 'Proponent / partners', 'Responses', 'Average score', 'Report'],
             result.completed_events,
             item => [
                 item.title,
@@ -4471,6 +4923,21 @@ async function renderEventHistory() {
     const completed = panel('Completed events');
     addReportTable(completed, ['Event', 'Project', 'Schedule', 'Present volunteers'], events,
         item => [item.title, item.project_title, `${item.date_start} – ${item.date_end}`, item.attendance_count]);
+    if (['admin', 'partner'].includes(currentUser.role) && events.length) {
+        const eventDetails = node('div', undefined, 'record-list');
+        events.forEach(item => {
+            const record = node('article', undefined, 'record');
+            const info = node('div', undefined, 'record-main');
+            info.append(node('strong', item.title), node('small', `${item.project_title} · ${item.date_start} – ${item.date_end}`));
+            const open = button('View full details', `viewevent-${item.id}`, 'button button-primary button-small');
+            open.addEventListener('click', () => navigateToEventPage(Number(item.id)));
+            const actions = node('div', undefined, 'record-actions');
+            actions.append(open);
+            record.append(info, actions);
+            eventDetails.append(record);
+        });
+        completed.append(eventDetails);
+    }
     const files = panel('Project / personal documentation');
     addReportTable(files, ['File', 'Project / event', 'Type', 'Description', 'Uploaded'], documents,
         item => [item.original_name, item.project_title, item.document_type, item.description || '—', dashboardDate(item.created_at, { month: 'short', day: 'numeric', year: 'numeric' })]);
@@ -5940,75 +6407,19 @@ async function renderProposalDetails(projectId) {
     }
 
     const body = node('div', undefined, 'project-dossier-body');
-    const summary = node('section', undefined, 'project-dossier-section project-dossier-summary');
-    summary.append(node('h3', 'Project Overview'), node('p', project.summary || 'No brief description provided.'));
-    body.append(summary);
-
-    const brief = node('section', undefined, 'project-dossier-section');
-    brief.append(node('h3', 'Project Brief'));
-    const briefGroups = [
-        ['Proponent', data.owner?.organization_name || `${data.owner?.first_name || ''} ${data.owner?.last_name || ''}`.trim() || 'Not available'],
-        ['Proposed by', project.proposerName || 'Not provided'],
-        ['Co-Proponents / Partner Organizations', [...(project.proponents || []), ...(project.expectedPrivatePartnerships ? [`Historical partnership note: ${project.expectedPrivatePartnerships}`] : [])].join(', ') || 'No partner organizations provided.'],
-        ['Program Duration', project.duration || dateRange],
-        ['Project Venue / Location', project.venue || 'Not specified'],
-        ['Activity Components', (project.activityComponents || []).join('\n') || 'No activity components provided.'],
-        ['Justification / Objectives', project.justification || 'Not provided'],
-        ['Target Beneficiaries & Headcount', project.targetBeneficiaries || 'Not provided'],
-        ['Target Outputs / Success Indicators', project.targetOutputs || 'Not provided'],
-        ['Possible Risks & Mitigation Plan', project.possibleRisks || 'Not provided'],
-        ['Volunteer Engagement', project.acceptsVolunteers ? `Yes · ${project.volunteerApprovalMode === 'auto' ? 'Auto Accept' : 'Manual Review'}` : 'No'],
-        ['Project Classifications', (data.classifications || []).join(', ') || 'Not specified'],
-        ['CES Categories', (data.categories || []).join(', ') || 'Not specified']
-    ];
-    const fields = node('div', undefined, 'project-dossier-fields');
-    briefGroups.forEach(([label, value]) => {
-        const detail = node('div', undefined, 'project-brief-field');
-        detail.append(node('strong', label), node('p', value));
-        fields.append(detail);
-    });
-    brief.append(fields);
-
-    const budget = node('section', undefined, 'project-dossier-section project-dossier-budget');
-    budget.append(node('h3', 'Estimated Cost Breakdown'));
-    const budgetItems = data.project.estimatedCostItems || [];
-    if (!budgetItems.length) {
-        budget.append(node('p', 'No budget items provided.'));
+    appendProposalRecordSections(body, data);
+    const linkedEvents = detailSection('Associated events');
+    if (!(data.events || []).length) {
+        linkedEvents.append(node('p', 'No event records are associated with this proposal.', 'empty'));
     } else {
-        const table = node('table', undefined, 'proposal-table');
-        table.innerHTML = '<thead><tr><th>Item</th><th>Unit / Pax</th><th>Quantity</th><th>Unit Cost</th><th>Subtotal</th></tr></thead>';
-        const tbody = node('tbody');
-        const renderBudgetItem = item => {
-            const row = node('tr');
-            row.append(
-                node('td', item.description),
-                node('td', item.unit),
-                node('td', item.quantity),
-                node('td', `₱${Number(item.cost).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`),
-                node('td', `₱${Number(item.subtotal).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`)
-            );
-            return row;
-        };
-        table.append(tbody);
-        const tableWrap = node('div', undefined, 'proposal-table-wrap');
-        tableWrap.append(table);
-        let budgetPage = 1;
-        let pagination;
-        const renderBudget = () => {
-            const previousPagination = pagination;
-            pagination = renderPaginatedItems(tbody, budgetItems, renderBudgetItem, budgetPage, nextPage => {
-                budgetPage = nextPage;
-                renderBudget();
-            }, 'budget items');
-            previousPagination?.replaceWith(pagination);
-        };
-        budget.append(tableWrap);
-        renderBudget();
-        budget.append(pagination);
+        (data.events || []).forEach(event => {
+            const eventCard = node('article', undefined, 'record-nested-card');
+            eventCard.append(node('h4', `${event.title} · Event #${event.id}`));
+            appendEventRecordSections(eventCard, event);
+            linkedEvents.append(eventCard);
+        });
     }
-    budget.append(node('p', `Total Estimated Cost: ₱${Number(project.totalEstimatedCost || 0).toLocaleString('en-PH', { minimumFractionDigits: 2 })}`, 'project-brief-total'));
-    brief.append(budget);
-    body.append(brief);
+    body.append(linkedEvents);
 
     const footer = node('footer', undefined, 'project-dossier-footer');
     const download = node('a', 'Download / Print PDF', 'button button-primary');
